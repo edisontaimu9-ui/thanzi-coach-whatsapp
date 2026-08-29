@@ -292,7 +292,9 @@ function markdownToWhatsApp(text) {
     .replace(/\*\*(.+?)\*\*/g, "*$1*")
     .replace(/__(.+?)__/g, "*$1*")
     // "- item" or "* item" bullets -> "• item"
-    .replace(/^[-*]\s+/gm, "• ");
+    .replace(/^[-*]\s+/gm, "• ")
+    // "[1]" / "[1][2]" citation markers -> italicized with WhatsApp's _..._
+    .replace(/(?:\[\d+\])+/g, (m) => `_${m}_`);
 }
 
 // Turns a markdown table (| Header | Header |\n|---|---|\n| val | val |)
