@@ -212,7 +212,9 @@ async function lookupBarcode(barcode, env) {
     throw new Error(`Barcode lookup error: ${res.status} ${await res.text()}`);
   }
   const body = await res.json();
-  const item = body?.data?.[0];
+  // A barcode lookup returns `data` as a single object; a name search
+  // (q=...) returns `data` as an array. Handle both.
+  const item = Array.isArray(body?.data) ? body.data[0] : body?.data;
   return item ? formatFoodResult(item) : null;
 }
 
@@ -223,8 +225,10 @@ function formatFoodResult(item) {
   const name = item.product_name || item.food_name || item.name;
   if (!name) return null;
 
-  const brand = item.brand ? ` (${item.brand})` : "";
-  const measure = item.measure ? ` — ${item.measure}` : "";
+  const brandName = item.brand || item.raw_data?.brands;
+  const brand = brandName ? ` (${brandName})` : "";
+  const measure = item.measure || item.raw_data?.quantity;
+  const measureText = measure ? ` — ${measure}` : "";
   const kcal = item.kcal ?? item.energy_kcal;
   const protein = item.protein_g;
   const carbs = item.carbs_g;
@@ -236,7 +240,7 @@ function formatFoodResult(item) {
   if (carbs != null) macros.push(`${carbs}g carbs`);
   if (fat != null) macros.push(`${fat}g fat`);
 
-  const lines = [`*${name}*${brand}${measure}`];
+  const lines = [`*${name}*${brand}${measureText}`];
   if (macros.length) lines.push(macros.join(", "));
   return lines.join("\n");
 }
