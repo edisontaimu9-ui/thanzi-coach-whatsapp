@@ -4,8 +4,13 @@
  * Flow:
  *   1. Meta sends webhook verification (GET) once when you register the webhook URL.
  *   2. Meta POSTs incoming messages here whenever someone messages +265 886 29 53 24.
- *   3. We extract the text, call Chakudya API's /rag/ask endpoint.
- *   4. We send the answer back to the user via the WhatsApp Cloud API.
+ *   3. Text messages:
+ *        - Pure digits (8-14 chars) are treated as a barcode -> /foods/lookup
+ *          for instant structured product data (no LLM).
+ *        - Everything else -> /rag/ask for a conversational, cited answer.
+ *   4. Image messages (photo of a nutrition label) -> downloaded from
+ *      WhatsApp, sent to /packaged/scan for OCR + nutrient extraction.
+ *   5. Reply sent back via the WhatsApp Cloud API.
  *
  * Required secrets (set with `wrangler secret put <NAME>` — never hardcode these):
  *   WHATSAPP_TOKEN         - Meta permanent/system-user access token
@@ -70,16 +75,20 @@ async function handleIncomingMessage(request, env) {
   const change = entry?.changes?.[0];
   const message = change?.value?.messages?.[0];
 
-  if (!message || message.type !== "text") {
-    return new Response("OK", { status: 200 }); // ack, nothing to do
+  if (!message) {
+    return new Response("OK", { status: 200 }); // status callback, nothing to do
   }
 
   const from = message.from; // sender's WhatsApp number
-  const userText = message.text.body;
 
   try {
-    const answer = await askChakudya(userText, from, env);
-    await sendWhatsAppReply(from, answer, env);
+    if (message.type === "text") {
+      await handleTextMessage(message.text.body, from, env);
+    } else if (message.type === "image") {
+      await handleImageMessage(message.image, from, env);
+    } else {
+      return new Response("OK", { status: 200 }); // unsupported type, ack silently
+    }
   } catch (err) {
     console.error("Thanzi Coach error:", err);
     await sendWhatsAppReply(
@@ -91,6 +100,145 @@ async function handleIncomingMessage(request, env) {
 
   // Always 200 quickly — Meta retries aggressively on non-200/timeout
   return new Response("OK", { status: 200 });
+}
+
+// Plain numeric text (8-14 digits) is almost always a barcode being typed
+// or pasted in, not a nutrition question. Fast-path it to /foods/lookup for
+// instant structured data instead of routing through the LLM in /rag/ask.
+function looksLikeBarcode(text) {
+  return /^\d{8,14}$/.test(text.trim());
+}
+
+async function handleTextMessage(userText, from, env) {
+  if (looksLikeBarcode(userText)) {
+    const barcode = userText.trim();
+    const product = await lookupBarcode(barcode, env);
+    if (product) {
+      await sendWhatsAppReply(from, product, env);
+      return;
+    }
+    // No product found for that barcode — fall through to rag/ask, which
+    // can still respond helpfully (e.g. "I couldn't find that product").
+  }
+
+  const answer = await askChakudya(userText, from, env);
+  await sendWhatsAppReply(from, answer, env);
+}
+
+async function handleImageMessage(image, from, env) {
+  const mediaId = image?.id;
+  if (!mediaId) {
+    await sendWhatsAppReply(
+      from,
+      "Ndilandire chithunzi, koma sindinathe kuchiwerenga. Yesaninso. 🙏",
+      env
+    );
+    return;
+  }
+
+  await sendWhatsAppReply(
+    from,
+    "Ndikuwerenga chithunzi... mudikire pang'ono. 📷",
+    env
+  ).catch(() => {}); // best-effort progress ping; not fatal if it fails
+
+  const { base64, mimeType } = await downloadWhatsAppMedia(mediaId, env);
+  const result = await scanPackagedLabel(base64, mimeType, env);
+  await sendWhatsAppReply(from, result, env);
+}
+
+// WhatsApp media is two-step: first ask Graph API for a short-lived URL,
+// then fetch the actual bytes from that URL (both calls need the same
+// bearer token).
+async function downloadWhatsAppMedia(mediaId, env) {
+  const metaRes = await fetch(`https://graph.facebook.com/v20.0/${mediaId}`, {
+    headers: { Authorization: `Bearer ${env.WHATSAPP_TOKEN}` },
+  });
+  if (!metaRes.ok) {
+    throw new Error(`Media lookup error: ${metaRes.status} ${await metaRes.text()}`);
+  }
+  const meta = await metaRes.json();
+
+  const fileRes = await fetch(meta.url, {
+    headers: { Authorization: `Bearer ${env.WHATSAPP_TOKEN}` },
+  });
+  if (!fileRes.ok) {
+    throw new Error(`Media download error: ${fileRes.status}`);
+  }
+
+  const buf = await fileRes.arrayBuffer();
+  const base64 = arrayBufferToBase64(buf);
+  return { base64, mimeType: meta.mime_type || "image/jpeg" };
+}
+
+function arrayBufferToBase64(buf) {
+  let binary = "";
+  const bytes = new Uint8Array(buf);
+  const chunkSize = 0x8000; // avoid call-stack limits on large images
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
+async function scanPackagedLabel(base64, mimeType, env) {
+  const dataUrl = `data:${mimeType};base64,${base64}`;
+  const res = await env.CHAKUDYA_API.fetch("https://chakudya-api/packaged/scan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ images: [dataUrl] }),
+  });
+
+  if (res.status === 422) {
+    return "Sindinathe kuwerenga zambiri pa chithunzichi. Chonde jambulani bwino chizindikiro cha zakudya (nutrition label) ndikutumizanso. 🙏";
+  }
+  if (res.status === 429) {
+    const retryAfter = res.headers.get("Retry-After") || "a minute";
+    return `Ndikulandila zithunzi zambiri pakadali pano. Chonde yesaninso pambuyo pa ${retryAfter}s. 🙏`;
+  }
+  if (!res.ok) {
+    throw new Error(`Packaged scan error: ${res.status} ${await res.text()}`);
+  }
+
+  const body = await res.json();
+  return formatFoodResult(body?.data) || "Ndawerenga chithunzicho, koma sindinapeze zambiri zokwanira.";
+}
+
+async function lookupBarcode(barcode, env) {
+  const res = await env.CHAKUDYA_API.fetch(
+    `https://chakudya-api/foods/lookup?barcode=${encodeURIComponent(barcode)}`
+  );
+  if (!res.ok) {
+    throw new Error(`Barcode lookup error: ${res.status} ${await res.text()}`);
+  }
+  const body = await res.json();
+  const item = body?.data?.[0];
+  return item ? formatFoodResult(item) : null;
+}
+
+// Formats a Food/PackagedFood/external-lookup result (field names vary by
+// source) into a short WhatsApp-friendly card.
+function formatFoodResult(item) {
+  if (!item) return null;
+  const name = item.product_name || item.food_name || item.name;
+  if (!name) return null;
+
+  const brand = item.brand ? ` (${item.brand})` : "";
+  const measure = item.measure ? ` — ${item.measure}` : "";
+  const kcal = item.kcal ?? item.energy_kcal;
+  const protein = item.protein_g;
+  const carbs = item.carbs_g;
+  const fat = item.fat_g;
+
+  const macros = [];
+  if (kcal != null) macros.push(`${kcal} kcal`);
+  if (protein != null) macros.push(`${protein}g protein`);
+  if (carbs != null) macros.push(`${carbs}g carbs`);
+  if (fat != null) macros.push(`${fat}g fat`);
+
+  const lines = [`*${name}*${brand}${measure}`];
+  if (macros.length) lines.push(macros.join(", "));
+  return lines.join("\n");
 }
 
 async function askChakudya(query, fromNumber, env) {
