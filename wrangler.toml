@@ -6,9 +6,20 @@ compatibility_date = "2026-08-01"
 PHONE_NUMBER_ID = "1269406299584594"
 
 # Secrets are set via GitHub Actions (see .github/workflows/deploy.yml),
-# sourced from repo secrets WHATSAPP_TOKEN, VERIFY_TOKEN, and GROQ_API_KEY.
+# sourced from repo secrets WHATSAPP_TOKEN, VERIFY_TOKEN, GROQ_API_KEY, and
+# STATS_TOKEN.
 # GROQ_API_KEY is for direct barcode-reading vision calls (api.groq.com),
 # separate from Chakudya's own OCR pipeline. Get one at console.groq.com.
+# STATS_TOKEN is any string you invent — required as ?token= on GET /stats.
+
+# D1 database for analytics (unique users, message counts). Create once via
+# Cloudflare dashboard > Workers & Pages > D1 > Create database, name it
+# thanzi_analytics, then paste its Database ID below. Migrations in
+# migrations/ apply automatically on every push (see deploy.yml).
+[[d1_databases]]
+binding = "DB"
+database_name = "thanzi_analytics"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
 
 # Service Binding: direct Worker-to-Worker call to chakudya-api, instead of
 # fetching its public *.workers.dev URL. Calling a sibling Worker's public

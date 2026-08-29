@@ -16,6 +16,13 @@
  *   WHATSAPP_TOKEN         - Meta permanent/system-user access token
  *   VERIFY_TOKEN           - a string you invent; must match what you enter in
  *                            Meta App Dashboard > WhatsApp > Configuration > Webhook
+ *   GROQ_API_KEY            - console.groq.com API key, for direct barcode-from-photo reads
+ *   STATS_TOKEN             - a string you invent; required as ?token= on GET /stats
+ *
+ * DB is a D1 binding (see wrangler.toml [[d1_databases]]) tracking unique
+ * WhatsApp users and message events for analytics. GET /stats?token=...
+ * returns aggregate metrics (total/new/active/returning users, message
+ * counts) as JSON.
  *
  * Required vars (set in wrangler.toml [vars], not secret since not sensitive):
  *   PHONE_NUMBER_ID        - the WhatsApp Business phone number ID (from Meta dashboard,
@@ -33,7 +40,7 @@
  */
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
     if (request.method === "GET" && url.pathname === "/webhook") {
@@ -41,7 +48,11 @@ export default {
     }
 
     if (request.method === "POST" && url.pathname === "/webhook") {
-      return handleIncomingMessage(request, env);
+      return handleIncomingMessage(request, env, ctx);
+    }
+
+    if (request.method === "GET" && url.pathname === "/stats") {
+      return handleStats(url, env);
     }
 
     return new Response("Thanzi Coach webhook is running.", { status: 200 });
@@ -61,7 +72,7 @@ function handleVerification(url, env) {
 }
 
 // --- Step 2-4: incoming message -> Chakudya RAG -> reply ---
-async function handleIncomingMessage(request, env) {
+async function handleIncomingMessage(request, env, ctx) {
   let body;
   try {
     body = await request.json();
@@ -80,6 +91,12 @@ async function handleIncomingMessage(request, env) {
   }
 
   const from = message.from; // sender's WhatsApp number
+
+  // Fire-and-forget analytics write — ctx.waitUntil lets it finish after the
+  // response is sent, without slowing down or risking the actual reply.
+  if (message.type === "text" || message.type === "image") {
+    ctx.waitUntil(recordActivity(from, message.type, env));
+  }
 
   try {
     if (message.type === "text") {
@@ -449,5 +466,78 @@ async function sendWhatsAppReply(to, text, env) {
 
   if (!res.ok) {
     throw new Error(`WhatsApp send error: ${res.status} ${await res.text()}`);
+  }
+}
+
+// --- Analytics (D1) ---
+// Records/updates a user row and logs one event per message. Wrapped in
+// try/catch so an analytics failure never breaks the actual bot reply —
+// this is called via ctx.waitUntil, fire-and-forget.
+async function recordActivity(whatsappId, type, env) {
+  try {
+    const now = new Date().toISOString();
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO users (whatsapp_id, first_seen, last_seen, message_count)
+         VALUES (?1, ?2, ?2, 1)
+         ON CONFLICT(whatsapp_id) DO UPDATE SET
+           last_seen = ?2,
+           message_count = message_count + 1`
+      ).bind(whatsappId, now),
+      env.DB.prepare(
+        `INSERT INTO events (whatsapp_id, ts, type) VALUES (?1, ?2, ?3)`
+      ).bind(whatsappId, now, type),
+    ]);
+  } catch (err) {
+    console.error("Analytics write failed:", err);
+  }
+}
+
+// GET /stats?token=...&days=30 — simple protected JSON dashboard.
+// Auth is a query-string token compared to the STATS_TOKEN secret, since
+// this is a low-stakes read-only endpoint, not a full auth system.
+async function handleStats(url, env) {
+  const token = url.searchParams.get("token");
+  if (!env.STATS_TOKEN || token !== env.STATS_TOKEN) {
+    return new Response("Forbidden", { status: 403 });
+  }
+
+  const days = Number(url.searchParams.get("days")) || 30;
+  const cutoff = new Date(Date.now() - days * 86400000).toISOString();
+
+  try {
+    const [totalUsers, newUsers, activeUsers, periodMessages, allTimeMessages] =
+      await Promise.all([
+        env.DB.prepare(`SELECT COUNT(*) AS n FROM users`).first("n"),
+        env.DB.prepare(`SELECT COUNT(*) AS n FROM users WHERE first_seen >= ?1`)
+          .bind(cutoff)
+          .first("n"),
+        env.DB.prepare(`SELECT COUNT(*) AS n FROM users WHERE last_seen >= ?1`)
+          .bind(cutoff)
+          .first("n"),
+        env.DB.prepare(`SELECT COUNT(*) AS n FROM events WHERE ts >= ?1`)
+          .bind(cutoff)
+          .first("n"),
+        env.DB.prepare(`SELECT COUNT(*) AS n FROM events`).first("n"),
+      ]);
+
+    const stats = {
+      period_days: days,
+      total_users: totalUsers,
+      new_users: newUsers,
+      active_users: activeUsers,
+      returning_users: Math.max(activeUsers - newUsers, 0),
+      messages_in_period: periodMessages,
+      messages_all_time: allTimeMessages,
+    };
+
+    return new Response(JSON.stringify(stats, null, 2), {
+      headers: { "Content-Type": "application/json" },
+    });
+  } catch (err) {
+    return new Response(
+      JSON.stringify({ error: String(err?.message || err) }),
+      { status: 500, headers: { "Content-Type": "application/json" } }
+    );
   }
 }

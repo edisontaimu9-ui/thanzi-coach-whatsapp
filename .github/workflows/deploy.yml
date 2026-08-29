@@ -10,13 +10,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Apply D1 migrations
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          command: d1 migrations apply thanzi_analytics --remote
+
       - name: Deploy to Cloudflare Workers
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           command: deploy
 
-      - name: Push secrets (WHATSAPP_TOKEN, VERIFY_TOKEN, GROQ_API_KEY)
+      - name: Push secrets (WHATSAPP_TOKEN, VERIFY_TOKEN, GROQ_API_KEY, STATS_TOKEN)
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -24,7 +30,9 @@ jobs:
             WHATSAPP_TOKEN
             VERIFY_TOKEN
             GROQ_API_KEY
+            STATS_TOKEN
         env:
           WHATSAPP_TOKEN: ${{ secrets.WHATSAPP_TOKEN }}
           VERIFY_TOKEN: ${{ secrets.VERIFY_TOKEN }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          STATS_TOKEN: ${{ secrets.STATS_TOKEN }}
