@@ -382,13 +382,15 @@ function buildReferencesList(answerText, sources) {
   }
   if (!used.length) return "";
 
-  const lines = used
-    .map((id) => {
-      const src = sources.find((s) => s.id === id);
-      const label = prettifySourceLabel(src?.title);
-      return label ? `[${id}] ${label}` : null;
-    })
-    .filter(Boolean);
+  const lines = [];
+  const seenLabels = new Set();
+  for (const id of used) {
+    const src = sources.find((s) => s.id === id);
+    const label = prettifySourceLabel(src?.title);
+    if (!label || seenLabels.has(label)) continue; // same source, different id — skip the repeat
+    seenLabels.add(label);
+    lines.push(`[${id}] ${label}`);
+  }
   if (!lines.length) return "";
 
   return `\n\n_References:_\n${lines.join("\n")}`;
