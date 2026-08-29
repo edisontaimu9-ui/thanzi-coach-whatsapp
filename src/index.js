@@ -328,7 +328,10 @@ async function askChakudya(query, fromNumber, env) {
     body: JSON.stringify({
       query,
       context: "both",
-      top_k: 6,
+      // 6 was too narrow for comparison questions ("compare X and Y") —
+      // often only enough results came back for one side of the
+      // comparison. Widened to give retrieval room to cover both.
+      top_k: 12,
       // Using the sender's WhatsApp number as session_id gives each user
       // their own Thandizo memory thread across conversations.
       session_id: `whatsapp-${fromNumber}`,
@@ -371,12 +374,31 @@ function buildReferencesList(answerText, sources) {
   const lines = used
     .map((id) => {
       const src = sources.find((s) => s.id === id);
-      return src?.title ? `[${id}] ${src.title}` : null;
+      const label = prettifySourceLabel(src?.title);
+      return label ? `[${id}] ${label}` : null;
     })
     .filter(Boolean);
   if (!lines.length) return "";
 
   return `\n\n_References:_\n${lines.join("\n")}`;
+}
+
+// Some source titles are raw internal slugs (e.g. "exchange_lists") rather
+// than a real document title — makes for an ugly, meaningless reference
+// line. Detect that pattern (all lowercase snake_case, no spaces/
+// punctuation — real titles always have those) and turn it into a
+// readable label instead. Genuine titles (book/document names, food
+// names) pass through unchanged.
+function prettifySourceLabel(title) {
+  if (!title) return null;
+  if (/^[a-z0-9]+(_[a-z0-9]+)*$/.test(title)) {
+    const words = title
+      .split("_")
+      .map((w) => w[0].toUpperCase() + w.slice(1))
+      .join(" ");
+    return `Chakudya ${words} Database`;
+  }
+  return title;
 }
 
 // Chakudya's answers come back in standard Markdown (**bold**, # headers,
