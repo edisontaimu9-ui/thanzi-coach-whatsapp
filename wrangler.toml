@@ -1,0 +1,12 @@
+name = "thanzi-coach-whatsapp"
+main = "src/index.js"
+compatibility_date = "2026-08-01"
+
+[vars]
+PHONE_NUMBER_ID = "REPLACE_WITH_META_PHONE_NUMBER_ID"
+CHAKUDYA_API_URL = "https://chakudya-api.edisontaimu9.workers.dev"
+
+# Secrets are NOT set here — run these from Termux after deploying once:
+#   npx wrangler secret put WHATSAPP_TOKEN
+#   npx wrangler secret put VERIFY_TOKEN
+# /rag/ask is public + rate-limited, no API key needed.
