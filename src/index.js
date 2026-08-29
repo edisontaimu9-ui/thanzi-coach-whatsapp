@@ -126,13 +126,14 @@ async function askChakudya(query, fromNumber, env) {
 }
 
 // Chakudya's answers come back in standard Markdown (**bold**, # headers,
-// "- " bullets). WhatsApp only understands its own lightweight formatting
-// (*bold* with single asterisks, _italic_, ~strikethrough~) and has no
-// concept of headers — anything else shows up as literal characters. This
-// converts the common cases so replies render properly in the chat.
+// "- " bullets, | table | rows). WhatsApp only understands its own
+// lightweight formatting (*bold* with single asterisks, _italic_,
+// ~strikethrough~) and has NO concept of headers or tables — anything else
+// shows up as literal characters. This converts the common cases so replies
+// render properly in the chat.
 function markdownToWhatsApp(text) {
   if (!text) return text;
-  return text
+  return convertMarkdownTables(text)
     // "### Heading" / "## Heading" -> "*Heading*"
     .replace(/^#{1,6}\s+(.+)$/gm, "*$1*")
     // "**bold**" or "__bold__" -> "*bold*" (WhatsApp's single-asterisk bold)
@@ -140,6 +141,53 @@ function markdownToWhatsApp(text) {
     .replace(/__(.+?)__/g, "*$1*")
     // "- item" or "* item" bullets -> "• item"
     .replace(/^[-*]\s+/gm, "• ");
+}
+
+// Turns a markdown table (| Header | Header |\n|---|---|\n| val | val |)
+// into readable lines, since WhatsApp can't render tables at all — pipes
+// would otherwise show up as literal "|" characters on a cramped mobile
+// screen. Each row becomes: "*first column* — col2: val, col3: val, ..."
+function convertMarkdownTables(text) {
+  const lines = text.split("\n");
+  const out = [];
+  let i = 0;
+
+  const isRow = (l) => /^\s*\|.*\|\s*$/.test(l);
+  const isSeparator = (l) => isRow(l) && /^[\s|:-]+$/.test(l) && l.includes("-");
+  const cells = (l) =>
+    l
+      .trim()
+      .replace(/^\|/, "")
+      .replace(/\|$/, "")
+      .split("|")
+      .map((c) => c.trim());
+
+  while (i < lines.length) {
+    if (isRow(lines[i]) && isSeparator(lines[i + 1] || "")) {
+      const headerCells = cells(lines[i]);
+      i += 2; // skip header row + separator row
+      while (i < lines.length && isRow(lines[i])) {
+        const rowCells = cells(lines[i]);
+        const label = rowCells[0] || "";
+        const rest = headerCells
+          .slice(1)
+          .map((h, idx) => {
+            const val = rowCells[idx + 1];
+            return val && val !== "-" ? `${h}: ${val}` : null;
+          })
+          .filter(Boolean)
+          .join(", ");
+        out.push(rest ? `*${label}* — ${rest}` : `*${label}*`);
+        i++;
+      }
+      out.push(""); // blank line after the table
+      continue;
+    }
+    out.push(lines[i]);
+    i++;
+  }
+
+  return out.join("\n");
 }
 
 async function sendWhatsAppReply(to, text, env) {
