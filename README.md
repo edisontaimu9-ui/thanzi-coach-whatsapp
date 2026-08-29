@@ -3,7 +3,7 @@
 Bridges the +265 886 29 53 24 WhatsApp Business number (Meta Cloud API) to
 your Chakudya API `/rag/ask` endpoint.
 
-## Before deploying — fill in one thing
+## Before pushing — fill in one thing
 
 `CHAKUDYA_API_URL` is already set to `https://chakudya-api.edisontaimu9.workers.dev`
 and the `/rag/ask` request/response shapes match `openapi.json` exactly (public,
@@ -11,32 +11,33 @@ no API key needed). You only need to set, in `wrangler.toml`:
 
 - `PHONE_NUMBER_ID` — from Meta App Dashboard > WhatsApp > API Setup
 
-## Push to your repo and deploy from Termux
+## Deploy — via GitHub Actions (wrangler doesn't run in Termux)
+
+This repo deploys itself on every push to `main` via
+`.github/workflows/deploy.yml`. You never run wrangler locally.
+
+One-time setup, in the GitHub repo (Settings > Secrets and variables > Actions
+> New repository secret):
+
+- `CLOUDFLARE_API_TOKEN` — Cloudflare dashboard > My Profile > API Tokens >
+  Create Token > "Edit Cloudflare Workers" template
+- `WHATSAPP_TOKEN` — Meta permanent/system-user access token
+- `VERIFY_TOKEN` — any string you invent (must match what you enter in
+  Meta App Dashboard > WhatsApp > Configuration > Webhook)
+
+Once those three secrets exist, every `git push` to `main` deploys the
+Worker and pushes the two Worker secrets automatically.
+
+## Push from Termux
 
 ```bash
-cd thanzi-coach-whatsapp
-git init
-git remote add origin https://github.com/edisontaimu9-ui/thanzi-coach-whatsapp.git
+cd ~/thanzi-coach-whatsapp
 git add .
-git commit -m "Rebuild Thanzi Coach WhatsApp bridge -> Chakudya /rag/ask"
-git branch -M main
-git push -u origin main
-
-npm install
-npx wrangler login          # once, opens browser auth
-npx wrangler deploy
+git commit -m "Add GitHub Actions deploy workflow"
+git push
 ```
 
-## Set secrets (after first deploy)
-
-```bash
-npx wrangler secret put WHATSAPP_TOKEN
-npx wrangler secret put VERIFY_TOKEN
-# only if your RAG endpoint requires auth:
-npx wrangler secret put CHAKUDYA_API_KEY
-```
-
-`VERIFY_TOKEN` can be any string you invent — just remember it for the next step.
+Then watch the deploy under the repo's **Actions** tab on GitHub.
 
 ## Register the webhook with Meta
 
@@ -50,8 +51,8 @@ npx wrangler secret put CHAKUDYA_API_KEY
 Send a WhatsApp message to +265 886 29 53 24 asking a nutrition question —
 it should route through Chakudya's RAG and reply in the chat.
 
-## Watch logs while testing
+## Watch logs
 
-```bash
-npx wrangler tail
-```
+Cloudflare dashboard > Workers & Pages > thanzi-coach-whatsapp > Logs
+(real-time `wrangler tail` isn't available without local wrangler, but the
+dashboard's live log view covers the same need).
