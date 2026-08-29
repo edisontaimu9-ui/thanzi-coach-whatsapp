@@ -78,11 +78,13 @@ async function handleIncomingMessage(request, env) {
     await sendWhatsAppReply(from, answer, env);
   } catch (err) {
     console.error("Thanzi Coach error:", err);
-    await sendWhatsAppReply(
-      from,
-      "Pepani, pali vuto pakadali pano. Yesaninso pambuyo pa mphindi zochepa. 🙏",
-      env
-    ).catch(() => {}); // best-effort; don't crash the webhook ack
+    // TEMPORARY DEBUG: send the real error back instead of the generic
+    // message, so we can see the failure directly in WhatsApp without
+    // needing dashboard log access. Revert once diagnosed.
+    const debugMsg = `DEBUG: ${String(err?.message || err).slice(0, 300)}`;
+    await sendWhatsAppReply(from, debugMsg, env).catch((e2) => {
+      console.error("Also failed to send debug reply:", e2);
+    });
   }
 
   // Always 200 quickly — Meta retries aggressively on non-200/timeout
