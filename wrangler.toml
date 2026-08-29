@@ -3,7 +3,7 @@ main = "src/index.js"
 compatibility_date = "2026-08-01"
 
 [vars]
-PHONE_NUMBER_ID = "REPLACE_WITH_META_PHONE_NUMBER_ID"
+PHONE_NUMBER_ID = "1269406299584594"
 CHAKUDYA_API_URL = "https://chakudya-api.edisontaimu9.workers.dev"
 
 # Secrets are NOT set here — run these from Termux after deploying once:
