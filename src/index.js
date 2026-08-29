@@ -15,7 +15,11 @@
  * Required vars (set in wrangler.toml [vars], not secret since not sensitive):
  *   PHONE_NUMBER_ID        - the WhatsApp Business phone number ID (from Meta dashboard,
  *                            NOT the phone number itself)
- *   CHAKUDYA_API_URL       - https://chakudya-api.edisontaimu9.workers.dev
+ *
+ * CHAKUDYA_API is a Service Binding (see wrangler.toml [[services]]), not a
+ * public URL — Worker-to-Worker calls within the same account use this
+ * instead of fetch() to a *.workers.dev URL, which triggers Cloudflare
+ * error 1042 ("request attempting to route to itself").
  *
  * /rag/ask is public + rate-limited (no auth needed). Contract, per openapi.json:
  *   POST /rag/ask  { query, context: "clinical"|"general"|"both", top_k, session_id }
@@ -78,13 +82,11 @@ async function handleIncomingMessage(request, env) {
     await sendWhatsAppReply(from, answer, env);
   } catch (err) {
     console.error("Thanzi Coach error:", err);
-    // TEMPORARY DEBUG: send the real error back instead of the generic
-    // message, so we can see the failure directly in WhatsApp without
-    // needing dashboard log access. Revert once diagnosed.
-    const debugMsg = `DEBUG: ${String(err?.message || err).slice(0, 300)}`;
-    await sendWhatsAppReply(from, debugMsg, env).catch((e2) => {
-      console.error("Also failed to send debug reply:", e2);
-    });
+    await sendWhatsAppReply(
+      from,
+      "Pepani, pali vuto pakadali pano. Yesaninso pambuyo pa mphindi zochepa. 🙏",
+      env
+    ).catch(() => {}); // best-effort; don't crash the webhook ack
   }
 
   // Always 200 quickly — Meta retries aggressively on non-200/timeout
@@ -92,7 +94,9 @@ async function handleIncomingMessage(request, env) {
 }
 
 async function askChakudya(query, fromNumber, env) {
-  const res = await fetch(`${env.CHAKUDYA_API_URL}/rag/ask`, {
+  // Service binding call — internal Worker-to-Worker, not a public fetch.
+  // See wrangler.toml for why (avoids Cloudflare error 1042).
+  const res = await env.CHAKUDYA_API.fetch("https://chakudya-api/rag/ask", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({

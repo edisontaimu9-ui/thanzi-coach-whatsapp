@@ -4,9 +4,19 @@ compatibility_date = "2026-08-01"
 
 [vars]
 PHONE_NUMBER_ID = "1269406299584594"
-CHAKUDYA_API_URL = "https://chakudya-api.edisontaimu9.workers.dev"
 
 # Secrets are NOT set here — run these from Termux after deploying once:
 #   npx wrangler secret put WHATSAPP_TOKEN
 #   npx wrangler secret put VERIFY_TOKEN
 # /rag/ask is public + rate-limited, no API key needed.
+
+# Service Binding: direct Worker-to-Worker call to chakudya-api, instead of
+# fetching its public *.workers.dev URL. Calling a sibling Worker's public
+# URL from within the same Cloudflare account triggers error 1042 ("request
+# attempting to route to itself") — a Cloudflare loop-safeguard. A service
+# binding is a direct internal call that bypasses that restriction entirely
+# and is faster too. "service" must exactly match the deployed Worker's name
+# (chakudya-api's `name = "..."` line in its own wrangler.toml).
+[[services]]
+binding = "CHAKUDYA_API"
+service = "chakudya-api"
