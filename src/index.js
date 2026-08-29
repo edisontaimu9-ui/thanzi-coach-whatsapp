@@ -319,6 +319,17 @@ function formatFoodResult(item) {
   return lines.join("\n");
 }
 
+// We don't control Chakudya's internal prompt/retrieval logic (separate
+// repo), but the query text itself IS fed to its LLM — so for
+// comparison-style questions we can nudge it toward a fair, like-for-like
+// comparison (same serving size for each food) by appending an instruction
+// to the query before sending it.
+function normalizeComparisonQuery(query) {
+  const isComparison = /\b(compare|comparison|vs\.?|versus)\b|&/i.test(query);
+  if (!isComparison) return query;
+  return `${query} (Please compare using the same serving size, e.g. per 100 g, for each food so it's a fair comparison.)`;
+}
+
 async function askChakudya(query, fromNumber, env) {
   // Service binding call — internal Worker-to-Worker, not a public fetch.
   // See wrangler.toml for why (avoids Cloudflare error 1042).
@@ -326,7 +337,7 @@ async function askChakudya(query, fromNumber, env) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      query,
+      query: normalizeComparisonQuery(query),
       context: "both",
       // 6 was too narrow for comparison questions ("compare X and Y") —
       // often only enough results came back for one side of the
