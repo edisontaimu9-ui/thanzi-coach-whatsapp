@@ -120,7 +120,26 @@ async function askChakudya(query, fromNumber, env) {
 
   const body = await res.json();
   const answer = body?.data?.answer;
-  return answer || "Pepani, sindinapeze yankho pa funso limeneli.";
+  return markdownToWhatsApp(
+    answer || "Pepani, sindinapeze yankho pa funso limeneli."
+  );
+}
+
+// Chakudya's answers come back in standard Markdown (**bold**, # headers,
+// "- " bullets). WhatsApp only understands its own lightweight formatting
+// (*bold* with single asterisks, _italic_, ~strikethrough~) and has no
+// concept of headers — anything else shows up as literal characters. This
+// converts the common cases so replies render properly in the chat.
+function markdownToWhatsApp(text) {
+  if (!text) return text;
+  return text
+    // "### Heading" / "## Heading" -> "*Heading*"
+    .replace(/^#{1,6}\s+(.+)$/gm, "*$1*")
+    // "**bold**" or "__bold__" -> "*bold*" (WhatsApp's single-asterisk bold)
+    .replace(/\*\*(.+?)\*\*/g, "*$1*")
+    .replace(/__(.+?)__/g, "*$1*")
+    // "- item" or "* item" bullets -> "• item"
+    .replace(/^[-*]\s+/gm, "• ");
 }
 
 async function sendWhatsAppReply(to, text, env) {
