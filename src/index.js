@@ -271,10 +271,38 @@ async function askChakudya(query, fromNumber, env) {
   }
 
   const body = await res.json();
-  const answer = body?.data?.answer;
-  return markdownToWhatsApp(
-    answer || "Pepani, sindinapeze yankho pa funso limeneli."
-  );
+  const answer = body?.data?.answer || "Pepani, sindinapeze yankho pa funso limeneli.";
+  const references = buildReferencesList(answer, body?.data?.sources);
+  return markdownToWhatsApp(answer) + references;
+}
+
+// Chakudya returns a `sources` array (id, title) separate from the answer
+// text, which just has inline "[1]" markers. WhatsApp has no hyperlinks/
+// footnotes, so we build a plain reference list and append it — only for
+// citation numbers actually used in the answer, deduped, in first-seen order.
+function buildReferencesList(answerText, sources) {
+  if (!sources?.length) return "";
+
+  const used = [];
+  const seen = new Set();
+  for (const m of answerText.matchAll(/\[(\d+)\]/g)) {
+    const id = Number(m[1]);
+    if (!seen.has(id)) {
+      seen.add(id);
+      used.push(id);
+    }
+  }
+  if (!used.length) return "";
+
+  const lines = used
+    .map((id) => {
+      const src = sources.find((s) => s.id === id);
+      return src?.title ? `[${id}] ${src.title}` : null;
+    })
+    .filter(Boolean);
+  if (!lines.length) return "";
+
+  return `\n\n_References:_\n${lines.join("\n")}`;
 }
 
 // Chakudya's answers come back in standard Markdown (**bold**, # headers,
