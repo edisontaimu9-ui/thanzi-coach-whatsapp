@@ -19,7 +19,7 @@ PHONE_NUMBER_ID = "1269406299584594"
 [[d1_databases]]
 binding = "DB"
 database_name = "thanzi_analytics"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_id = "b9170a96-d6ed-4b26-b137-06cb073ea01a"
 
 # Service Binding: direct Worker-to-Worker call to chakudya-api, instead of
 # fetching its public *.workers.dev URL. Calling a sibling Worker's public
