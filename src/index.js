@@ -143,8 +143,65 @@ async function handleImageMessage(image, from, env) {
   ).catch(() => {}); // best-effort progress ping; not fatal if it fails
 
   const { base64, mimeType } = await downloadWhatsAppMedia(mediaId, env);
+
+  // Try reading it as a barcode first (fast, cheap, precise task). Only if
+  // no barcode is found do we fall back to Chakudya's nutrition-label OCR —
+  // this way one photo handles either case automatically.
+  const barcode = await readBarcodeFromImage(base64, mimeType, env);
+  if (barcode) {
+    const product = await lookupBarcode(barcode, env);
+    await sendWhatsAppReply(
+      from,
+      product ||
+        `Ndawerenga barcode ${barcode}, koma sindinapeze mankhwala ake m'databasi. 🙏`,
+      env
+    );
+    return;
+  }
+
   const result = await scanPackagedLabel(base64, mimeType, env);
   await sendWhatsAppReply(from, result, env);
+}
+
+// Direct Groq vision call (independent of Chakudya) specifically to read
+// barcode digits from a photo. Returns the digit string, or null if no
+// barcode is visible in the image.
+async function readBarcodeFromImage(base64, mimeType, env) {
+  const dataUrl = `data:${mimeType};base64,${base64}`;
+  const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${env.GROQ_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: "qwen/qwen3.6-27b",
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: "If this image shows a barcode, reply with ONLY the numeric digits printed under/beside it (no spaces, no other text). If there is no barcode visible in the image, reply with exactly: NONE",
+            },
+            { type: "image_url", image_url: { url: dataUrl } },
+          ],
+        },
+      ],
+      temperature: 0,
+      max_completion_tokens: 30,
+    }),
+  });
+
+  if (!res.ok) {
+    console.error("Groq barcode read error:", res.status, await res.text());
+    return null; // fail open -> falls back to nutrition-label OCR
+  }
+
+  const body = await res.json();
+  const raw = body?.choices?.[0]?.message?.content?.trim() || "";
+  const digits = raw.replace(/\D/g, "");
+  return digits.length >= 8 && digits.length <= 14 ? digits : null;
 }
 
 // WhatsApp media is two-step: first ask Graph API for a short-lived URL,
