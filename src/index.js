@@ -270,6 +270,17 @@ function arrayBufferToBase64(buf) {
   return btoa(binary);
 }
 
+// When Chakudya (or the LLM behind it) is rate-limited, overloaded, or
+// otherwise temporarily unavailable, the user gets this exact friendly
+// message — never the raw status code, provider/model name, token-limit
+// detail, or billing info. Those specifics are logged server-side via
+// console.error only, for debugging, never sent to WhatsApp.
+const LLM_BUSY_MESSAGE = "Sorry, Thanzi Coach is temporarily busy. Please try again in a moment.";
+
+function isProviderUnavailable(status) {
+  return status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+}
+
 async function scanPackagedLabel(base64, mimeType, env) {
   const dataUrl = `data:${mimeType};base64,${base64}`;
   const res = await env.CHAKUDYA_API.fetch("https://chakudya-api/packaged/scan", {
@@ -281,9 +292,9 @@ async function scanPackagedLabel(base64, mimeType, env) {
   if (res.status === 422) {
     return "Sindinathe kuwerenga zambiri pa chithunzichi. Chonde jambulani bwino chizindikiro cha zakudya (nutrition label) ndikutumizanso. 🙏";
   }
-  if (res.status === 429) {
-    const retryAfter = res.headers.get("Retry-After") || "a minute";
-    return `Ndikulandila zithunzi zambiri pakadali pano. Chonde yesaninso pambuyo pa ${retryAfter}s. 🙏`;
+  if (isProviderUnavailable(res.status)) {
+    console.error("Packaged scan provider unavailable:", res.status, await res.text());
+    return LLM_BUSY_MESSAGE;
   }
   if (!res.ok) {
     throw new Error(`Packaged scan error: ${res.status} ${await res.text()}`);
@@ -371,9 +382,9 @@ async function askChakudya(query, fromNumber, env) {
     }),
   });
 
-  if (res.status === 429) {
-    const retryAfter = res.headers.get("Retry-After") || "a minute";
-    return `Ndikulandila mafunso ambiri pakadali pano. Chonde yesaninso pambuyo pa ${retryAfter}s. 🙏`;
+  if (isProviderUnavailable(res.status)) {
+    console.error("Chakudya provider unavailable:", res.status, await res.text());
+    return LLM_BUSY_MESSAGE;
   }
 
   if (!res.ok) {
