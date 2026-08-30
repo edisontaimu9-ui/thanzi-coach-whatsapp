@@ -321,13 +321,17 @@ function formatFoodResult(item) {
 
 // We don't control Chakudya's internal prompt/retrieval logic (separate
 // repo), but the query text itself IS fed to its LLM — so for
-// comparison-style questions we can nudge it toward a fair, like-for-like
-// comparison (same serving size for each food) by appending an instruction
-// to the query before sending it.
-function normalizeComparisonQuery(query) {
-  const isComparison = /\b(compare|comparison|vs\.?|versus)\b|&/i.test(query);
-  if (!isComparison) return query;
-  return `${query} (Please compare using the same serving size, e.g. per 100 g, for each food so it's a fair comparison.)`;
+// multi-topic questions (comparisons, or "X and Y" combos like a patient
+// with two conditions) we can nudge retrieval/answering toward covering
+// everything asked, and give it a bigger top_k so retrieval has room for
+// both topics instead of one crowding out the other.
+function isMultiTopicQuery(query) {
+  return /\b(compare|comparison|vs\.?|versus|and)\b|&/i.test(query);
+}
+
+function normalizeMultiTopicQuery(query) {
+  if (!isMultiTopicQuery(query)) return query;
+  return `${query} (If this covers multiple foods, conditions, or topics, please address each one using all relevant available information, and use consistent serving sizes when comparing foods.)`;
 }
 
 async function askChakudya(query, fromNumber, env) {
@@ -337,12 +341,12 @@ async function askChakudya(query, fromNumber, env) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      query: normalizeComparisonQuery(query),
+      query: normalizeMultiTopicQuery(query),
       context: "both",
-      // 6 was too narrow for comparison questions ("compare X and Y") —
-      // often only enough results came back for one side of the
-      // comparison. Widened to give retrieval room to cover both.
-      top_k: 12,
+      // Multi-topic questions ("compare X and Y", "diabetes and
+      // hypertension") need more retrieved chunks so one topic doesn't
+      // crowd out the other — plain single-topic questions stay leaner.
+      top_k: isMultiTopicQuery(query) ? 20 : 12,
       // Using the sender's WhatsApp number as session_id gives each user
       // their own Thandizo memory thread across conversations.
       session_id: `whatsapp-${fromNumber}`,
