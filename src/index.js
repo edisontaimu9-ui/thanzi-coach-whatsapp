@@ -431,40 +431,59 @@ async function askChakudya(query, fromNumber, env) {
     return SUBREQUEST_LIMIT_MESSAGE;
   }
 
-  const references = buildReferencesList(answer, body?.data?.sources);
-  return markdownToWhatsApp(answer) + references;
+  const { text: renumberedAnswer, references } = renumberCitations(answer, body?.data?.sources);
+  return markdownToWhatsApp(renumberedAnswer) + references;
 }
 
 // Chakudya returns a `sources` array (id, title) separate from the answer
-// text, which just has inline "[1]" markers. WhatsApp has no hyperlinks/
-// footnotes, so we build a plain reference list and append it — only for
-// citation numbers actually used in the answer, deduped, in first-seen order.
-function buildReferencesList(answerText, sources) {
-  if (!sources?.length) return "";
+// text, which just has inline "[1]" markers using Chakudya's own internal
+// source ids — these are rarely 1, 2, 3, ... in order (could be [3], [7],
+// [12], ...) since they're indices into Chakudya's full source list, not
+// per-answer citation numbers. This renumbers them to a clean 1, 2, 3, ...
+// sequence based on first appearance in the answer, rewrites the inline
+// markers to match, and builds the reference list using the same numbers.
+// If the same source is cited under two different original ids, the second
+// occurrence reuses the first's number instead of taking a new one, so the
+// sequence never has a number with no matching reference line.
+function renumberCitations(answerText, sources) {
+  if (!sources?.length) return { text: answerText, references: "" };
 
-  const used = [];
-  const seen = new Set();
+  const idToNumber = new Map();
+  const labelToNumber = new Map();
+  const refLines = [];
+  let next = 1;
+
   for (const m of answerText.matchAll(/\[(\d+)\]/g)) {
     const id = Number(m[1]);
-    if (!seen.has(id)) {
-      seen.add(id);
-      used.push(id);
-    }
-  }
-  if (!used.length) return "";
+    if (idToNumber.has(id)) continue; // already assigned a number
 
-  const lines = [];
-  const seenLabels = new Set();
-  for (const id of used) {
     const src = sources.find((s) => s.id === id);
     const label = prettifySourceLabel(src?.title);
-    if (!label || seenLabels.has(label)) continue; // same source, different id — skip the repeat
-    seenLabels.add(label);
-    lines.push(`[${id}] ${label}`);
-  }
-  if (!lines.length) return "";
 
-  return `\n\n_References:_\n${lines.join("\n")}`;
+    if (label && labelToNumber.has(label)) {
+      idToNumber.set(id, labelToNumber.get(label));
+      continue;
+    }
+
+    const num = next++;
+    idToNumber.set(id, num);
+    if (label) {
+      labelToNumber.set(label, num);
+      refLines.push(`[${num}] ${label}`);
+    }
+    // else: source id had no matching entry/title — still gets a number so
+    // the visible sequence stays consecutive, just no reference line for it.
+  }
+
+  if (!idToNumber.size) return { text: answerText, references: "" };
+
+  const renumbered = answerText.replace(/\[(\d+)\]/g, (whole, idStr) => {
+    const num = idToNumber.get(Number(idStr));
+    return num ? `[${num}]` : whole;
+  });
+
+  const references = refLines.length ? `\n\n_References:_\n${refLines.join("\n")}` : "";
+  return { text: renumbered, references };
 }
 
 // Some source titles are raw internal slugs (e.g. "exchange_lists") rather
