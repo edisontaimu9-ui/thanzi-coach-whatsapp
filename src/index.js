@@ -144,30 +144,40 @@ function looksLikeBarcode(text) {
 // Chakudya's nutrition retrieval at all — routing it through /rag/ask just
 // burns a request and comes back with an odd, citation-laden answer to a
 // question that was never really about food/health data. Handled with a
-// static, instant reply instead. Matched on the whole message (trimmed,
+// static, instant reply instead, matched on the whole message (trimmed,
 // punctuation stripped) so it doesn't misfire on a real question that
-// merely starts with "hi" or similar.
-const GREETING_REPLY =
+// merely starts with "hi" or similar. Replies in whichever language the
+// greeting itself was in, rather than always defaulting to one.
+const GREETING_REPLY_EN =
+  "Hi there! 👋 I'm Thanzi Coach. I can help with questions about nutrition and health — ask me something, send a barcode, or snap a photo of a nutrition label. What would you like help with today?";
+const GREETING_REPLY_NY =
   "Muli bwanji! 👋 Ndine Thanzi Coach. Ndingakuthandizeni ndi mafunso okhudza zakudya ndi thanzi — mungandifunse funso, mutumize barcode, kapena mujambule chizindikiro cha zakudya (nutrition label). Kodi mukufuna chithandizo cha chiyani lero?";
 
-const GREETING_PATTERNS = [
+const ENGLISH_GREETINGS = [
   "hi", "hello", "hey", "hiya", "yo",
   "good morning", "good afternoon", "good evening", "good day",
   "how are you", "how are you?", "how're you", "hows it going", "how's it going",
   "what's up", "whats up", "sup",
-  "moni", "muli bwanji", "mwauka bwanji", "mwadzuka bwanji", "odi",
-  "thanks", "thank you", "zikomo",
+  "thanks", "thank you",
   "bye", "goodbye", "see you",
 ];
 
-function isGreeting(text) {
+const CHICHEWA_GREETINGS = [
+  "moni", "muli bwanji", "mwauka bwanji", "mwadzuka bwanji", "odi", "zikomo",
+];
+
+// Returns "en", "ny", or null (not a recognized greeting at all).
+function detectGreetingLanguage(text) {
   const t = text.trim().toLowerCase().replace(/[!?.,]+$/g, "");
-  return GREETING_PATTERNS.includes(t);
+  if (ENGLISH_GREETINGS.includes(t)) return "en";
+  if (CHICHEWA_GREETINGS.includes(t)) return "ny";
+  return null;
 }
 
 async function handleTextMessage(userText, from, env) {
-  if (isGreeting(userText)) {
-    await sendWhatsAppReply(from, GREETING_REPLY, env);
+  const greetingLang = detectGreetingLanguage(userText);
+  if (greetingLang) {
+    await sendWhatsAppReply(from, greetingLang === "en" ? GREETING_REPLY_EN : GREETING_REPLY_NY, env);
     return;
   }
 
