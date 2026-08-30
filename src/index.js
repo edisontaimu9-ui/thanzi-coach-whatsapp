@@ -343,10 +343,13 @@ async function askChakudya(query, fromNumber, env) {
     body: JSON.stringify({
       query: normalizeMultiTopicQuery(query),
       context: "both",
-      // Multi-topic questions ("compare X and Y", "diabetes and
-      // hypertension") need more retrieved chunks so one topic doesn't
-      // crowd out the other — plain single-topic questions stay leaner.
-      top_k: isMultiTopicQuery(query) ? 20 : 12,
+      // top_k: 20 for multi-topic queries pushed Chakudya's internal
+      // per-item fan-out (KB + Malawi FCT + exchange lists, etc.) past
+      // Cloudflare's per-invocation subrequest ceiling and broke retrieval
+      // entirely ("Too many subrequests"). 12 is the safe ceiling that
+      // still works — rely on the query-text nudge above (no extra
+      // subrequests) to get fuller multi-topic coverage instead.
+      top_k: 12,
       // Using the sender's WhatsApp number as session_id gives each user
       // their own Thandizo memory thread across conversations.
       session_id: `whatsapp-${fromNumber}`,
