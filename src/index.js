@@ -225,6 +225,20 @@ async function handleTextMessage(userText, from, env) {
     }
   }
 
+  // "quinoa 200g" / "200g of rice" — a specific-weight nutrition request is
+  // arithmetic (scale the per-100g figures), not something an LLM should be
+  // asked to compute. Doing it as real math here is both more reliable and
+  // avoids routing through /rag/ask, which has hit its own subrequest limit
+  // on queries shaped like this.
+  const foodQty = detectFoodQuantity(userText);
+  if (foodQty) {
+    const scaled = await answerFoodQuantity(foodQty.food, foodQty.grams, env);
+    if (scaled) {
+      await sendWhatsAppReply(from, scaled, env);
+      return;
+    }
+  }
+
   // A bare food name ("Quinoa", "Soya pieces") is really a lookup, not a
   // question. Chakudya's /rag/ask retrieval sometimes indexes its cached
   // USDA/external results without a serving-size field, so the LLM has to
@@ -285,6 +299,87 @@ async function compareTwoFoods(nameA, nameB, env) {
   const cardB = formatFoodResult(itemB);
   if (!cardA || !cardB) return null;
   return `${cardA}\n\n${cardB}`;
+}
+
+// Common filler words that end up wrapped around the food name when the
+// gram amount trails the food ("find energy and macros for quinoa 200g")
+// — stripped iteratively from the front until only the food name is left.
+const QUANTITY_LEADING_FILLERS = new Set([
+  "find", "energy", "and", "macro", "macros", "for", "of", "nutrition",
+  "value", "in", "calculate", "calculation", "please", "me", "give",
+  "show", "tell", "the", "a", "an", "what", "is", "are", "how", "much",
+  "many", "kcal", "calories",
+]);
+
+function stripLeadingFillers(phrase) {
+  const words = phrase.trim().split(/\s+/);
+  while (words.length > 1 && QUANTITY_LEADING_FILLERS.has(words[0].toLowerCase())) {
+    words.shift();
+  }
+  return words.join(" ");
+}
+
+// Detects a food + specific gram amount, in either order:
+// "200g of quinoa" / "how many calories in 200g of rice?" (amount first),
+// or "quinoa 200g" / "find energy and macros for quinoa 200g" (amount last).
+function detectFoodQuantity(query) {
+  const amountFirst = query.match(
+    /(\d+(?:\.\d+)?)\s*g(?:rams)?\s+(?:of\s+)?([a-z][a-z '-]*?)[?.!]?$/i
+  );
+  if (amountFirst) {
+    const grams = Number(amountFirst[1]);
+    const food = amountFirst[2].trim();
+    if (grams > 0 && grams < 10000 && food) return { food, grams };
+  }
+
+  const amountLast = query.match(
+    /([a-z][a-z '-]*?)\s+(\d+(?:\.\d+)?)\s*g(?:rams)?[?.!]?$/i
+  );
+  if (amountLast) {
+    const grams = Number(amountLast[2]);
+    const food = stripLeadingFillers(amountLast[1]);
+    if (grams > 0 && grams < 10000 && food) return { food, grams };
+  }
+
+  return null;
+}
+
+// Looks up a food's per-100g-equivalent record, then scales its kcal/
+// protein/carbs/fat by real arithmetic to the requested gram amount — no
+// LLM involved, so it's both exact and avoids Chakudya's RAG pipeline
+// (which has hit its own subrequest ceiling on queries shaped like this).
+// Only scales against a gram-based measure (our own 100g default, or an
+// explicit "<N> g" in the record) — non-gram units (cups, tablespoons)
+// can't be linearly scaled without knowing their gram weight, so those
+// cases return null and fall back to /rag/ask instead.
+async function answerFoodQuantity(food, grams, env) {
+  const item = await lookupFoodByName(food, env);
+  if (!item) return null;
+
+  const name = item.product_name || item.food_name || item.name;
+  if (!name) return null;
+
+  const rawMeasure = item.measure || item.raw_data?.quantity;
+  const measureGramsMatch = rawMeasure ? rawMeasure.match(/(\d+(?:\.\d+)?)\s*g\b/i) : null;
+  const baseGrams = measureGramsMatch ? Number(measureGramsMatch[1]) : 100; // our own default
+  if (!baseGrams) return null;
+
+  const factor = grams / baseGrams;
+  const scale = (v) => (v == null ? null : Math.round(v * factor * 10) / 10);
+
+  const kcal = scale(item.kcal ?? item.energy_kcal);
+  const protein = scale(item.protein_g);
+  const carbs = scale(item.carbs_g);
+  const fat = scale(item.fat_g);
+
+  const macros = [];
+  if (kcal != null) macros.push(`${kcal} kcal`);
+  if (protein != null) macros.push(`${protein}g protein`);
+  if (carbs != null) macros.push(`${carbs}g carbs`);
+  if (fat != null) macros.push(`${fat}g fat`);
+  if (!macros.length) return null;
+
+  return `*${name}* — ${grams} g\n${macros.join(", ")}`;
 }
 
 async function handleImageMessage(image, from, env) {
