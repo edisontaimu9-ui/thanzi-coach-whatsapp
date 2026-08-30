@@ -123,11 +123,10 @@ async function handleIncomingMessage(request, env, ctx) {
   } catch (err) {
     console.error("Thanzi Coach error:", err);
     ctx.waitUntil(recordError(from, err, env));
-    await sendWhatsAppReply(
-      from,
-      "Pepani, pali vuto pakadali pano. Yesaninso pambuyo pa mphindi zochepa. 🙏",
-      env
-    ).catch(() => {}); // best-effort; don't crash the webhook ack
+    const reply = isSubrequestLimitError(err)
+      ? SUBREQUEST_LIMIT_MESSAGE
+      : "Pepani, pali vuto pakadali pano. Yesaninso pambuyo pa mphindi zochepa. 🙏";
+    await sendWhatsAppReply(from, reply, env).catch(() => {}); // best-effort; don't crash the webhook ack
   }
 
   // Always 200 quickly — Meta retries aggressively on non-200/timeout
@@ -270,7 +269,17 @@ function arrayBufferToBase64(buf) {
   return btoa(binary);
 }
 
-// When Chakudya (or the LLM behind it) is rate-limited, overloaded, or
+// Cloudflare throws this (not an HTTP status — a runtime exception) when a
+// single Worker invocation makes too many outbound fetch() calls, e.g. a
+// query that fans out across several internal Chakudya lookups. Detected by
+// message text since Cloudflare doesn't give it a distinct error type.
+const SUBREQUEST_LIMIT_MESSAGE =
+  "Sorry, we couldn’t complete your request right now. Please try again with a shorter or simpler question.";
+
+function isSubrequestLimitError(err) {
+  const msg = String(err?.message || err || "").toLowerCase();
+  return msg.includes("too many subrequests") || msg.includes("too many api requests");
+}
 // otherwise temporarily unavailable, the user gets this exact friendly
 // message — never the raw status code, provider/model name, token-limit
 // detail, or billing info. Those specifics are logged server-side via
