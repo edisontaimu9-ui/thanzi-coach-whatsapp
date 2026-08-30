@@ -108,7 +108,7 @@ async function handleIncomingMessage(request, env, ctx) {
 
   // Fire-and-forget analytics write — ctx.waitUntil lets it finish after the
   // response is sent, without slowing down or risking the actual reply.
-  if (message.type === "text" || message.type === "image") {
+  if (message.type === "text" || message.type === "image" || message.type === "interactive") {
     ctx.waitUntil(recordActivity(from, message.type, env));
   }
 
@@ -117,6 +117,18 @@ async function handleIncomingMessage(request, env, ctx) {
       await handleTextMessage(message.text.body, from, env);
     } else if (message.type === "image") {
       await handleImageMessage(message.image, from, env);
+    } else if (message.type === "interactive") {
+      // A tapped list row/button — its id carries the full prompt text (see
+      // sendPromptList), so route it through the exact same pipeline as if
+      // the user had typed it (barcode/comparison/quantity detection all
+      // still apply).
+      const tapped =
+        message.interactive?.list_reply?.id || message.interactive?.button_reply?.id;
+      if (tapped) {
+        await handleTextMessage(tapped, from, env);
+      } else {
+        return new Response("OK", { status: 200 });
+      }
     } else {
       return new Response("OK", { status: 200 }); // unsupported type, ack silently
     }
@@ -161,16 +173,11 @@ function looksLikeBareFoodName(text) {
 // Plain small-talk (greetings, "how are you", thanks, bye) doesn't need
 // Chakudya's nutrition retrieval at all — routing it through /rag/ask just
 // burns a request and comes back with an odd, citation-laden answer to a
-// question that was never really about food/health data. Handled with a
-// static, instant reply instead, matched on the whole message (trimmed,
-// punctuation stripped) so it doesn't misfire on a real question that
-// merely starts with "hi" or similar. Replies in whichever language the
-// greeting itself was in, rather than always defaulting to one.
-const GREETING_REPLY_EN =
-  "Hi there! 👋 I'm Thanzi Coach. I can help with questions about nutrition and health — ask me something, send a barcode, or snap a photo of a nutrition label. What would you like help with today?";
-const GREETING_REPLY_NY =
-  "Muli bwanji! 👋 Ndine Thanzi Coach. Ndingakuthandizeni ndi mafunso okhudza zakudya ndi thanzi — mungandifunse funso, mutumize barcode, kapena mujambule chizindikiro cha zakudya (nutrition label). Kodi mukufuna chithandizo cha chiyani lero?";
-
+// question that was never really about food/health data. Handled with an
+// instant tappable prompt list instead (see sendPromptList), matched on the
+// whole message (trimmed, punctuation stripped) so it doesn't misfire on a
+// real question that merely starts with "hi" or similar. Replies in
+// whichever language the greeting itself was in.
 const ENGLISH_GREETINGS = [
   "hi", "hello", "hey", "hiya", "yo",
   "good morning", "good afternoon", "good evening", "good day",
@@ -195,7 +202,7 @@ function detectGreetingLanguage(text) {
 async function handleTextMessage(userText, from, env) {
   const greetingLang = detectGreetingLanguage(userText);
   if (greetingLang) {
-    await sendWhatsAppReply(from, greetingLang === "en" ? GREETING_REPLY_EN : GREETING_REPLY_NY, env);
+    await sendPromptList(from, greetingLang, env);
     return;
   }
 
@@ -881,6 +888,79 @@ async function sendWhatsAppReply(to, text, env) {
     if (!res.ok) {
       throw new Error(`WhatsApp send error: ${res.status} ${await res.text()}`);
     }
+  }
+}
+
+// Example prompts shown as a tappable list after a greeting. Each row's id
+// carries the FULL query text (sent back to us verbatim when tapped — see
+// the interactive-message handling in handleIncomingMessage), while title
+// stays short to fit WhatsApp's 24-char row title limit.
+const PROMPT_EXAMPLES_EN = [
+  { id: "What foods are high in iron?", title: "High-iron foods" },
+  { id: "Compare nsima and rice", title: "Compare two foods" },
+  { id: "Exchange list for a diabetic patient", title: "Diabetic exchange list" },
+  { id: "What should I feed my child if they are malnourished?", title: "Child malnutrition" },
+  { id: "Quinoa", title: "Look up a food" },
+  { id: "quinoa 200g", title: "Nutrition for a weight" },
+];
+
+const PROMPT_EXAMPLES_NY = [
+  { id: "Ndi zakudya ziti zomwe zili ndi iron wambiri?", title: "Zakudya za iron" },
+  { id: "Compare nsima and rice", title: "Yerekezani zakudya" },
+  { id: "Exchange list for a diabetic patient", title: "Exchange list - shuga" },
+  { id: "What should I feed my child if they are malnourished?", title: "Kudyetsa mwana wowonda" },
+  { id: "Quinoa", title: "Funsani za chakudya" },
+  { id: "quinoa 200g", title: "Zambiri pa kulemera" },
+];
+
+async function sendPromptList(to, lang, env) {
+  const isEnglish = lang === "en";
+  const body = isEnglish
+    ? "Hi there! 👋 I'm Thanzi Coach. Tap an example below, or just type your own question anytime. You can also send a barcode number or a photo of a nutrition label."
+    : "Muli bwanji! 👋 Ndine Thanzi Coach. Sankhani chitsanzo pansipa, kapena lembani funso lanu nthawi ina iliyonse. Mutha kutumizanso barcode kapena chithunzi cha nutrition label.";
+  const buttonText = isEnglish ? "See examples" : "Onani zitsanzo";
+  const sectionTitle = isEnglish ? "Try asking" : "Yesani kufunsa";
+  const examples = isEnglish ? PROMPT_EXAMPLES_EN : PROMPT_EXAMPLES_NY;
+
+  await sendWhatsAppInteractiveList(
+    to,
+    {
+      body,
+      buttonText,
+      sections: [{ title: sectionTitle, rows: examples }],
+    },
+    env
+  );
+}
+
+async function sendWhatsAppInteractiveList(to, { body, buttonText, sections }, env) {
+  const res = await fetch(
+    `https://graph.facebook.com/v20.0/${env.PHONE_NUMBER_ID}/messages`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${env.WHATSAPP_TOKEN}`,
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        to,
+        type: "interactive",
+        interactive: {
+          type: "list",
+          body: { text: body },
+          action: { button: buttonText, sections },
+        },
+      }),
+    }
+  );
+
+  if (!res.ok) {
+    // Fall back to a plain-text reply if the interactive send itself fails
+    // (e.g. malformed payload, unsupported client) so the user still gets
+    // something useful instead of silence.
+    console.error("WhatsApp interactive list send error:", res.status, await res.text());
+    await sendWhatsAppReply(to, body, env);
   }
 }
 
