@@ -571,26 +571,61 @@ function convertMarkdownTables(text) {
   return out.join("\n");
 }
 
-async function sendWhatsAppReply(to, text, env) {
-  const res = await fetch(
-    `https://graph.facebook.com/v20.0/${env.PHONE_NUMBER_ID}/messages`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${env.WHATSAPP_TOKEN}`,
-      },
-      body: JSON.stringify({
-        messaging_product: "whatsapp",
-        to,
-        type: "text",
-        text: { body: text },
-      }),
-    }
-  );
+// WhatsApp's Cloud API rejects text messages over 4096 characters outright
+// (it doesn't silently truncate) — long Chakudya answers with references
+// can exceed that. Rather than ever cut content, split into multiple
+// messages sent in order. Prefers breaking at a paragraph boundary, then a
+// line break, then a space, so it never splits mid-word/mid-markdown-token
+// unless truly forced to.
+const WHATSAPP_MAX_LEN = 4000; // a little under the real 4096 cap, as headroom
 
-  if (!res.ok) {
-    throw new Error(`WhatsApp send error: ${res.status} ${await res.text()}`);
+function splitForWhatsApp(text, maxLen = WHATSAPP_MAX_LEN) {
+  if (text.length <= maxLen) return [text];
+
+  const chunks = [];
+  let remaining = text;
+
+  while (remaining.length > maxLen) {
+    let cut = remaining.lastIndexOf("\n\n", maxLen);
+    if (cut < maxLen * 0.4) cut = remaining.lastIndexOf("\n", maxLen);
+    if (cut < maxLen * 0.4) cut = remaining.lastIndexOf(" ", maxLen);
+    if (cut < maxLen * 0.4) cut = maxLen; // no good boundary — hard split
+
+    chunks.push(remaining.slice(0, cut).trimEnd());
+    remaining = remaining.slice(cut).trimStart();
+  }
+  if (remaining) chunks.push(remaining);
+
+  return chunks;
+}
+
+async function sendWhatsAppReply(to, text, env) {
+  const parts = splitForWhatsApp(text);
+  const multi = parts.length > 1;
+
+  for (let i = 0; i < parts.length; i++) {
+    const body = multi ? `${parts[i]}\n\n_(${i + 1}/${parts.length})_` : parts[i];
+
+    const res = await fetch(
+      `https://graph.facebook.com/v20.0/${env.PHONE_NUMBER_ID}/messages`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${env.WHATSAPP_TOKEN}`,
+        },
+        body: JSON.stringify({
+          messaging_product: "whatsapp",
+          to,
+          type: "text",
+          text: { body },
+        }),
+      }
+    );
+
+    if (!res.ok) {
+      throw new Error(`WhatsApp send error: ${res.status} ${await res.text()}`);
+    }
   }
 }
 
