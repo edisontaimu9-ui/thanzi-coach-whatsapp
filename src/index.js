@@ -140,6 +140,24 @@ function looksLikeBarcode(text) {
   return /^\d{8,14}$/.test(text.trim());
 }
 
+// A short message with no "?" and no question/verb wording ("Quinoa",
+// "Soya pieces") reads as a food-name lookup rather than a question — route
+// these to /foods/lookup directly (see handleTextMessage) instead of
+// /rag/ask, which has a serving-size metadata gap on cached external
+// results. Deliberately conservative: real questions (has "?", or starts
+// with a question/imperative word) are left alone and still go to RAG.
+const BARE_QUERY_LEADING_WORDS =
+  /^(what|how|why|when|where|who|which|is|are|can|does|do|should|will|would|could|tell|explain|describe|list|give|show|compare)\b/i;
+
+function looksLikeBareFoodName(text) {
+  const t = text.trim();
+  if (!t || t.includes("?")) return false;
+  const words = t.split(/\s+/);
+  if (words.length > 5) return false;
+  if (BARE_QUERY_LEADING_WORDS.test(t)) return false;
+  return true;
+}
+
 // Plain small-talk (greetings, "how are you", thanks, bye) doesn't need
 // Chakudya's nutrition retrieval at all — routing it through /rag/ask just
 // burns a request and comes back with an odd, citation-laden answer to a
@@ -203,6 +221,22 @@ async function handleTextMessage(userText, from, env) {
     const comparison = await compareTwoFoods(twoFood.foodA, twoFood.foodB, env);
     if (comparison) {
       await sendWhatsAppReply(from, comparison, env);
+      return;
+    }
+  }
+
+  // A bare food name ("Quinoa", "Soya pieces") is really a lookup, not a
+  // question. Chakudya's /rag/ask retrieval sometimes indexes its cached
+  // USDA/external results without a serving-size field, so the LLM has to
+  // hedge with "(unspecified typical serving)" — a gap in Chakudya's own
+  // knowledge-base indexing we can't patch from here (separate repo).
+  // /foods/lookup reliably includes a real measure, so route bare names
+  // there directly and only fall back to /rag/ask if nothing is found.
+  if (looksLikeBareFoodName(userText)) {
+    const item = await lookupFoodByName(userText.trim(), env);
+    const card = formatFoodResult(item);
+    if (card) {
+      await sendWhatsAppReply(from, card, env);
       return;
     }
   }
