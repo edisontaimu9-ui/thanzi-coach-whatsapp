@@ -538,10 +538,14 @@ async function recordActivity(whatsappId, type, env) {
 // GET /stats?token=...&days=30 — simple protected JSON dashboard.
 // Auth is a query-string token compared to the STATS_TOKEN secret, since
 // this is a low-stakes read-only endpoint, not a full auth system.
+const STATS_CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "https://edisontaimu9-ui.github.io",
+};
+
 async function handleStats(url, env) {
   const token = url.searchParams.get("token");
   if (!env.STATS_TOKEN || token !== env.STATS_TOKEN) {
-    return new Response("Forbidden", { status: 403 });
+    return new Response("Forbidden", { status: 403, headers: STATS_CORS_HEADERS });
   }
 
   const days = Number(url.searchParams.get("days")) || 30;
@@ -574,12 +578,12 @@ async function handleStats(url, env) {
     };
 
     return new Response(JSON.stringify(stats, null, 2), {
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...STATS_CORS_HEADERS },
     });
   } catch (err) {
     return new Response(
       JSON.stringify({ error: String(err?.message || err) }),
-      { status: 500, headers: { "Content-Type": "application/json" } }
+      { status: 500, headers: { "Content-Type": "application/json", ...STATS_CORS_HEADERS } }
     );
   }
 }
