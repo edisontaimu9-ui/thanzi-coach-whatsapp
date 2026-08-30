@@ -432,12 +432,16 @@ function normalizeMultiTopicQuery(query) {
   return `${query} (If this covers multiple foods, conditions, or topics, please address each one using all relevant available information, and use consistent serving sizes when comparing foods.)`;
 }
 
-// Nudges every answer to state the actual reference/serving amount (e.g.
-// "185 g", "1 cup cooked") alongside any nutrient values, instead of a vague
-// "per the reference amount shown" with no number attached to it.
-function withReferenceAmountInstruction(query) {
-  return `${query} (Always state the specific reference/serving amount — in grams, cups, or another concrete unit — for any nutrient values given, rather than referring to it without stating it.)`;
-}
+// NOTE: previously tried appending "always state the reference amount" as
+// an instruction to the query text sent to Chakudya, to fix answers that
+// mentioned nutrient values without saying what serving size they're for.
+// Pulled it — it appears to have changed how Chakudya's retrieval routes
+// the query, causing single-word food lookups (e.g. "Quinoa") to return
+// only the exchange-list match and skip its external cascade (USDA, Malawi
+// FCT) entirely, which is a worse regression than the problem it fixed.
+// If this needs solving again, it belongs in Chakudya's own answer
+// generation/prompt (separate repo), not as extra text bolted onto the
+// query here.
 
 // Chakudya's citation markers sometimes come back as fullwidth brackets
 // (【1】) instead of standard ASCII ([1]) — visually similar but a different
@@ -458,7 +462,7 @@ async function askChakudya(query, fromNumber, env) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      query: withReferenceAmountInstruction(normalizeMultiTopicQuery(query)),
+      query: normalizeMultiTopicQuery(query),
       context: "both",
       // top_k: 20 for multi-topic queries pushed Chakudya's internal
       // per-item fan-out (KB + Malawi FCT + exchange lists, etc.) past
