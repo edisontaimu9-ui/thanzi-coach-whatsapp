@@ -192,8 +192,65 @@ async function handleTextMessage(userText, from, env) {
     // can still respond helpfully (e.g. "I couldn't find that product").
   }
 
+  // Two-food nutrient comparisons ("100g of X vs 100g of Y") get pulled
+  // straight from /foods/lookup's real per-100g food-database records
+  // (with USDA/OFF/FatSecret cascade), bypassing /rag/ask entirely — its
+  // retrieval sometimes mixes in exchange-list data (per-serving, e.g.
+  // "2 sardines"), which isn't comparable to a 100g figure. If either food
+  // isn't found this way, fall through to the normal RAG path below.
+  const twoFood = detectTwoFoodComparison(userText);
+  if (twoFood) {
+    const comparison = await compareTwoFoods(twoFood.foodA, twoFood.foodB, env);
+    if (comparison) {
+      await sendWhatsAppReply(from, comparison, env);
+      return;
+    }
+  }
+
   const answer = await askChakudya(userText, from, env);
   await sendWhatsAppReply(from, answer, env);
+}
+
+// Detects phrasing like "100g of X ... compared with/to 100g of Y",
+// "compare X and Y", or "X vs Y" and extracts both food names.
+function detectTwoFoodComparison(query) {
+  const patterns = [
+    /\bof\s+([a-z0-9 ,()'-]+?)\s+compared\s+(?:with|to)\s+(?:\d+\s*g(?:rams)?\s+of\s+)?([a-z0-9 ,()'-]+?)[?.!]?$/i,
+    /\bcompare\b.*?\bof\s+([a-z0-9 ,()'-]+?)\s+(?:and|with|to|&|vs\.?|versus)\s+([a-z0-9 ,()'-]+?)[?.!]?$/i,
+    /\bcompare\b\s+([a-z0-9 ,()'-]+?)\s+(?:and|with|to|&|vs\.?|versus)\s+([a-z0-9 ,()'-]+?)[?.!]?$/i,
+    /^([a-z0-9 ,()'-]+?)\s+(?:vs\.?|versus)\s+([a-z0-9 ,()'-]+?)[?.!]?$/i,
+  ];
+  const stripTrailingVerb = (s) =>
+    s.replace(/\s+(provide|providing|have|has|contain|contains)$/i, "").trim();
+  for (const re of patterns) {
+    const m = query.match(re);
+    if (m && m[1] && m[2]) {
+      return { foodA: stripTrailingVerb(m[1].trim()), foodB: m[2].trim() };
+    }
+  }
+  return null;
+}
+
+async function lookupFoodByName(name, env) {
+  const res = await env.CHAKUDYA_API.fetch(
+    `https://chakudya-api/foods/lookup?q=${encodeURIComponent(name)}`
+  );
+  if (!res.ok) return null;
+  const body = await res.json();
+  return Array.isArray(body?.data) ? body.data[0] : body?.data || null;
+}
+
+// Returns two formatted food cards side by side, or null (to fall back to
+// /rag/ask) if either food isn't found in the food database.
+async function compareTwoFoods(nameA, nameB, env) {
+  const [itemA, itemB] = await Promise.all([
+    lookupFoodByName(nameA, env),
+    lookupFoodByName(nameB, env),
+  ]);
+  const cardA = formatFoodResult(itemA);
+  const cardB = formatFoodResult(itemB);
+  if (!cardA || !cardB) return null;
+  return `${cardA}\n\n${cardB}`;
 }
 
 async function handleImageMessage(image, from, env) {
