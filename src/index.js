@@ -490,8 +490,12 @@ function formatFoodResult(item) {
 
   const brandName = item.brand || item.raw_data?.brands;
   const brand = brandName ? ` (${brandName})` : "";
-  const measure = item.measure || item.raw_data?.quantity;
-  const measureText = measure ? ` — ${measure}` : "";
+  // USDA/Malawi FCT nutrient values are reported per 100g by standard
+  // convention when no other serving size is given (unlike branded/OFF
+  // products, which usually specify their own package quantity) — default
+  // to that instead of silently omitting the amount.
+  const measure = item.measure || item.raw_data?.quantity || "100 g";
+  const measureText = ` — ${measure}`;
   const kcal = item.kcal ?? item.energy_kcal;
   const protein = item.protein_g;
   const carbs = item.carbs_g;
