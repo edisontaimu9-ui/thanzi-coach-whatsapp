@@ -18,6 +18,9 @@
  *                            Meta App Dashboard > WhatsApp > Configuration > Webhook
  *   GROQ_API_KEY            - console.groq.com API key, for direct barcode-from-photo reads
  *   STATS_TOKEN             - a string you invent; required as ?token= on GET /stats
+ *   ADMIN_PHONE             - optional; your own WhatsApp number for the daily
+ *                            summary cron job (see wrangler.toml [triggers]).
+ *                            No-ops if unset.
  *
  * DB is a D1 binding (see wrangler.toml [[d1_databases]]) tracking unique
  * WhatsApp users and message events for analytics. GET /stats?token=...
@@ -60,6 +63,13 @@ export default {
     }
 
     return new Response("Thanzi Coach webhook is running.", { status: 200 });
+  },
+
+  // Cloudflare Cron Trigger (see wrangler.toml [triggers]). Sends a daily
+  // usage summary to ADMIN_PHONE over WhatsApp, using the bot's own send
+  // path — no separate notification channel to build or maintain.
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(sendDailySummary(env));
   },
 };
 
@@ -112,6 +122,7 @@ async function handleIncomingMessage(request, env, ctx) {
     }
   } catch (err) {
     console.error("Thanzi Coach error:", err);
+    ctx.waitUntil(recordError(from, err, env));
     await sendWhatsAppReply(
       from,
       "Pepani, pali vuto pakadali pano. Yesaninso pambuyo pa mphindi zochepa. 🙏",
@@ -539,12 +550,71 @@ async function recordActivity(whatsappId, type, env) {
   }
 }
 
+// Logs a bot-side failure (Chakudya/Groq/WhatsApp-send errors caught in
+// handleIncomingMessage) as its own event type, separate from normal
+// message events, so /stats can report an error rate — bot *health*, not
+// just usage. Doesn't touch the users table; a failed reply shouldn't count
+// as a new/returning visit. Fire-and-forget, like recordActivity.
+async function recordError(whatsappId, err, env) {
+  try {
+    await env.DB.prepare(
+      `INSERT INTO events (whatsapp_id, ts, type) VALUES (?1, ?2, 'error')`
+    )
+      .bind(whatsappId || "unknown", new Date().toISOString())
+      .run();
+  } catch (dbErr) {
+    console.error("Error-event write failed:", dbErr, "(original error:", err, ")");
+  }
+}
+
 // GET /stats?token=...&days=30 — simple protected JSON dashboard.
 // Auth is a query-string token compared to the STATS_TOKEN secret, since
 // this is a low-stakes read-only endpoint, not a full auth system.
 const STATS_CORS_HEADERS = {
   "Access-Control-Allow-Origin": "https://edisontaimu9-ui.github.io",
 };
+
+// Runs once/day from the `scheduled` handler. Summarizes the last 24h and
+// sends it as a normal WhatsApp text via the bot's own send path. Silently
+// does nothing if ADMIN_PHONE isn't set yet, so this is a no-op until you
+// opt in (see README for setup).
+async function sendDailySummary(env) {
+  if (!env.ADMIN_PHONE) {
+    console.log("sendDailySummary: ADMIN_PHONE not set, skipping.");
+    return;
+  }
+
+  const cutoff = new Date(Date.now() - 86400000).toISOString();
+
+  try {
+    const [newUsers, activeUsers, messages, errors] = await Promise.all([
+      env.DB.prepare(`SELECT COUNT(*) AS n FROM users WHERE first_seen >= ?1`)
+        .bind(cutoff)
+        .first("n"),
+      env.DB.prepare(`SELECT COUNT(*) AS n FROM users WHERE last_seen >= ?1`)
+        .bind(cutoff)
+        .first("n"),
+      env.DB.prepare(`SELECT COUNT(*) AS n FROM events WHERE ts >= ?1 AND type != 'error'`)
+        .bind(cutoff)
+        .first("n"),
+      env.DB.prepare(`SELECT COUNT(*) AS n FROM events WHERE ts >= ?1 AND type = 'error'`)
+        .bind(cutoff)
+        .first("n"),
+    ]);
+
+    const lines = [
+      "📊 *Thanzi Coach — daily summary*",
+      `New users: ${newUsers}`,
+      `Active users: ${activeUsers}`,
+      `Messages: ${messages}`,
+      errors > 0 ? `⚠️ Errors: ${errors}` : `Errors: 0 ✅`,
+    ];
+
+    await sendWhatsAppReply(env.ADMIN_PHONE, lines.join("\n"), env);
+  } catch (err) {
+    console.error("sendDailySummary failed:", err);
+  }
+}
 
 async function handleStats(url, env) {
   const token = url.searchParams.get("token");
@@ -556,7 +626,7 @@ async function handleStats(url, env) {
   const cutoff = new Date(Date.now() - days * 86400000).toISOString();
 
   try {
-    const [totalUsers, newUsers, activeUsers, periodMessages, allTimeMessages] =
+    const [totalUsers, newUsers, activeUsers, periodMessages, allTimeMessages, periodErrors] =
       await Promise.all([
         env.DB.prepare(`SELECT COUNT(*) AS n FROM users`).first("n"),
         env.DB.prepare(`SELECT COUNT(*) AS n FROM users WHERE first_seen >= ?1`)
@@ -565,10 +635,13 @@ async function handleStats(url, env) {
         env.DB.prepare(`SELECT COUNT(*) AS n FROM users WHERE last_seen >= ?1`)
           .bind(cutoff)
           .first("n"),
-        env.DB.prepare(`SELECT COUNT(*) AS n FROM events WHERE ts >= ?1`)
+        env.DB.prepare(`SELECT COUNT(*) AS n FROM events WHERE ts >= ?1 AND type != 'error'`)
           .bind(cutoff)
           .first("n"),
-        env.DB.prepare(`SELECT COUNT(*) AS n FROM events`).first("n"),
+        env.DB.prepare(`SELECT COUNT(*) AS n FROM events WHERE type != 'error'`).first("n"),
+        env.DB.prepare(`SELECT COUNT(*) AS n FROM events WHERE ts >= ?1 AND type = 'error'`)
+          .bind(cutoff)
+          .first("n"),
       ]);
 
     const stats = {
@@ -579,6 +652,8 @@ async function handleStats(url, env) {
       returning_users: Math.max(activeUsers - newUsers, 0),
       messages_in_period: periodMessages,
       messages_all_time: allTimeMessages,
+      errors_in_period: periodErrors,
+      error_rate: periodMessages > 0 ? Number((periodErrors / periodMessages).toFixed(4)) : 0,
     };
 
     return new Response(JSON.stringify(stats, null, 2), {
@@ -604,10 +679,10 @@ async function handleStatsTimeseries(url, env) {
   const cutoff = new Date(Date.now() - days * 86400000).toISOString();
 
   try {
-    const [messagesByDay, newUsersByDay] = await Promise.all([
+    const [messagesByDay, newUsersByDay, errorsByDay] = await Promise.all([
       env.DB.prepare(
         `SELECT substr(ts, 1, 10) AS day, COUNT(*) AS n
-         FROM events WHERE ts >= ?1
+         FROM events WHERE ts >= ?1 AND type != 'error'
          GROUP BY day ORDER BY day`
       )
         .bind(cutoff)
@@ -619,12 +694,20 @@ async function handleStatsTimeseries(url, env) {
       )
         .bind(cutoff)
         .all(),
+      env.DB.prepare(
+        `SELECT substr(ts, 1, 10) AS day, COUNT(*) AS n
+         FROM events WHERE ts >= ?1 AND type = 'error'
+         GROUP BY day ORDER BY day`
+      )
+        .bind(cutoff)
+        .all(),
     ]);
 
     // Merge both series onto a single zero-filled list of every day in range,
     // so the chart doesn't have to reason about missing dates.
     const msgMap = new Map(messagesByDay.results.map((r) => [r.day, r.n]));
     const newUserMap = new Map(newUsersByDay.results.map((r) => [r.day, r.n]));
+    const errorMap = new Map(errorsByDay.results.map((r) => [r.day, r.n]));
 
     const series = [];
     for (let i = days - 1; i >= 0; i--) {
@@ -633,6 +716,7 @@ async function handleStatsTimeseries(url, env) {
         date: d,
         messages: msgMap.get(d) || 0,
         new_users: newUserMap.get(d) || 0,
+        errors: errorMap.get(d) || 0,
       });
     }
 

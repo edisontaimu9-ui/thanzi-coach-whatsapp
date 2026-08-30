@@ -5,12 +5,23 @@ compatibility_date = "2026-08-01"
 [vars]
 PHONE_NUMBER_ID = "1269406299584594"
 
+# Daily summary: sends a WhatsApp message to ADMIN_PHONE once a day with
+# yesterday's usage (see sendDailySummary in src/index.js). Time is UTC —
+# "0 6 * * *" is 06:00 UTC daily (08:00 in Malawi, CAT/UTC+2).
+# Set ADMIN_PHONE as a repo secret (see deploy.yml) — the summary silently
+# does nothing until it's set.
+[triggers]
+crons = ["0 6 * * *"]
+
 # Secrets are set via GitHub Actions (see .github/workflows/deploy.yml),
-# sourced from repo secrets WHATSAPP_TOKEN, VERIFY_TOKEN, GROQ_API_KEY, and
-# STATS_TOKEN.
+# sourced from repo secrets WHATSAPP_TOKEN, VERIFY_TOKEN, GROQ_API_KEY,
+# STATS_TOKEN, and ADMIN_PHONE.
 # GROQ_API_KEY is for direct barcode-reading vision calls (api.groq.com),
 # separate from Chakudya's own OCR pipeline. Get one at console.groq.com.
 # STATS_TOKEN is any string you invent — required as ?token= on GET /stats.
+# ADMIN_PHONE is your own WhatsApp number (E.164, e.g. 265888xxxxxx, no
+# leading +) that the daily summary is sent to. Optional — the cron job
+# no-ops if it isn't set.
 
 # D1 database for analytics (unique users, message counts). Create once via
 # Cloudflare dashboard > Workers & Pages > D1 > Create database, name it
