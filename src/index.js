@@ -140,7 +140,37 @@ function looksLikeBarcode(text) {
   return /^\d{8,14}$/.test(text.trim());
 }
 
+// Plain small-talk (greetings, "how are you", thanks, bye) doesn't need
+// Chakudya's nutrition retrieval at all — routing it through /rag/ask just
+// burns a request and comes back with an odd, citation-laden answer to a
+// question that was never really about food/health data. Handled with a
+// static, instant reply instead. Matched on the whole message (trimmed,
+// punctuation stripped) so it doesn't misfire on a real question that
+// merely starts with "hi" or similar.
+const GREETING_REPLY =
+  "Muli bwanji! 👋 Ndine Thanzi Coach. Ndingakuthandizeni ndi mafunso okhudza zakudya ndi thanzi — mungandifunse funso, mutumize barcode, kapena mujambule chizindikiro cha zakudya (nutrition label). Kodi mukufuna chithandizo cha chiyani lero?";
+
+const GREETING_PATTERNS = [
+  "hi", "hello", "hey", "hiya", "yo",
+  "good morning", "good afternoon", "good evening", "good day",
+  "how are you", "how are you?", "how're you", "hows it going", "how's it going",
+  "what's up", "whats up", "sup",
+  "moni", "muli bwanji", "mwauka bwanji", "mwadzuka bwanji", "odi",
+  "thanks", "thank you", "zikomo",
+  "bye", "goodbye", "see you",
+];
+
+function isGreeting(text) {
+  const t = text.trim().toLowerCase().replace(/[!?.,]+$/g, "");
+  return GREETING_PATTERNS.includes(t);
+}
+
 async function handleTextMessage(userText, from, env) {
+  if (isGreeting(userText)) {
+    await sendWhatsAppReply(from, GREETING_REPLY, env);
+    return;
+  }
+
   if (looksLikeBarcode(userText)) {
     const barcode = userText.trim();
     const product = await lookupBarcode(barcode, env);
