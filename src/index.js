@@ -432,6 +432,25 @@ function normalizeMultiTopicQuery(query) {
   return `${query} (If this covers multiple foods, conditions, or topics, please address each one using all relevant available information, and use consistent serving sizes when comparing foods.)`;
 }
 
+// Nudges every answer to state the actual reference/serving amount (e.g.
+// "185 g", "1 cup cooked") alongside any nutrient values, instead of a vague
+// "per the reference amount shown" with no number attached to it.
+function withReferenceAmountInstruction(query) {
+  return `${query} (Always state the specific reference/serving amount — in grams, cups, or another concrete unit — for any nutrient values given, rather than referring to it without stating it.)`;
+}
+
+// Chakudya's citation markers sometimes come back as fullwidth brackets
+// (【1】) instead of standard ASCII ([1]) — visually similar but a different
+// character, so every regex here that looks for "[n]" (renumberCitations,
+// markdownToWhatsApp's italicizer) would silently miss them entirely,
+// leaving raw, unexplained 【n】 markers with no reference list. Normalize to
+// ASCII brackets immediately after the answer comes back, before anything
+// else touches it.
+function normalizeCitationBrackets(text) {
+  if (!text) return text;
+  return text.replace(/[【\[]\s*(\d+)\s*[】\]]/g, "[$1]");
+}
+
 async function askChakudya(query, fromNumber, env) {
   // Service binding call — internal Worker-to-Worker, not a public fetch.
   // See wrangler.toml for why (avoids Cloudflare error 1042).
@@ -439,7 +458,7 @@ async function askChakudya(query, fromNumber, env) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      query: normalizeMultiTopicQuery(query),
+      query: withReferenceAmountInstruction(normalizeMultiTopicQuery(query)),
       context: "both",
       // top_k: 20 for multi-topic queries pushed Chakudya's internal
       // per-item fan-out (KB + Malawi FCT + exchange lists, etc.) past
@@ -464,7 +483,9 @@ async function askChakudya(query, fromNumber, env) {
   }
 
   const body = await res.json();
-  const answer = body?.data?.answer || "Pepani, sindinapeze yankho pa funso limeneli.";
+  const answer = normalizeCitationBrackets(
+    body?.data?.answer || "Pepani, sindinapeze yankho pa funso limeneli."
+  );
 
   if (looksLikeLeakedProviderError(answer)) {
     console.error("Chakudya leaked a provider error into the answer text:", answer);
