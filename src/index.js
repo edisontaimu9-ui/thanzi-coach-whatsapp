@@ -280,6 +280,24 @@ function isSubrequestLimitError(err) {
   const msg = String(err?.message || err || "").toLowerCase();
   return msg.includes("too many subrequests") || msg.includes("too many api requests");
 }
+
+// Chakudya can hit its own internal subrequest ceiling mid-retrieval and
+// still return 200 OK, with the raw error text baked into `answer` instead
+// of thrown as a request failure — so isSubrequestLimitError() (which only
+// sees *our* exceptions) never catches this case. Scan the answer text
+// itself for Cloudflare's known error strings/URLs before it reaches the
+// user.
+function looksLikeLeakedProviderError(text) {
+  if (!text) return false;
+  const t = text.toLowerCase();
+  return (
+    t.includes("too many subrequests") ||
+    t.includes("too many api requests") ||
+    t.includes("llm answer unavailable") ||
+    t.includes("developers.cloudflare.com") ||
+    t.includes("single worker invocation")
+  );
+}
 // otherwise temporarily unavailable, the user gets this exact friendly
 // message — never the raw status code, provider/model name, token-limit
 // detail, or billing info. Those specifics are logged server-side via
@@ -310,7 +328,12 @@ async function scanPackagedLabel(base64, mimeType, env) {
   }
 
   const body = await res.json();
-  return formatFoodResult(body?.data) || "Ndawerenga chithunzicho, koma sindinapeze zambiri zokwanira.";
+  const result = formatFoodResult(body?.data);
+  if (result && looksLikeLeakedProviderError(result)) {
+    console.error("Packaged scan leaked a provider error:", result);
+    return SUBREQUEST_LIMIT_MESSAGE;
+  }
+  return result || "Ndawerenga chithunzicho, koma sindinapeze zambiri zokwanira.";
 }
 
 async function lookupBarcode(barcode, env) {
@@ -402,6 +425,12 @@ async function askChakudya(query, fromNumber, env) {
 
   const body = await res.json();
   const answer = body?.data?.answer || "Pepani, sindinapeze yankho pa funso limeneli.";
+
+  if (looksLikeLeakedProviderError(answer)) {
+    console.error("Chakudya leaked a provider error into the answer text:", answer);
+    return SUBREQUEST_LIMIT_MESSAGE;
+  }
+
   const references = buildReferencesList(answer, body?.data?.sources);
   return markdownToWhatsApp(answer) + references;
 }
