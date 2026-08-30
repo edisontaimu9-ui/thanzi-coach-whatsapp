@@ -55,6 +55,10 @@ export default {
       return handleStats(url, env);
     }
 
+    if (request.method === "GET" && url.pathname === "/stats/timeseries") {
+      return handleStatsTimeseries(url, env);
+    }
+
     return new Response("Thanzi Coach webhook is running.", { status: 200 });
   },
 };
@@ -578,6 +582,61 @@ async function handleStats(url, env) {
     };
 
     return new Response(JSON.stringify(stats, null, 2), {
+      headers: { "Content-Type": "application/json", ...STATS_CORS_HEADERS },
+    });
+  } catch (err) {
+    return new Response(
+      JSON.stringify({ error: String(err?.message || err) }),
+      { status: 500, headers: { "Content-Type": "application/json", ...STATS_CORS_HEADERS } }
+    );
+  }
+}
+
+// GET /stats/timeseries?token=...&days=30 — per-day messages and new-user
+// counts, for the dashboard's trend chart. Same token auth as /stats.
+async function handleStatsTimeseries(url, env) {
+  const token = url.searchParams.get("token");
+  if (!env.STATS_TOKEN || token !== env.STATS_TOKEN) {
+    return new Response("Forbidden", { status: 403, headers: STATS_CORS_HEADERS });
+  }
+
+  const days = Math.min(Number(url.searchParams.get("days")) || 30, 90);
+  const cutoff = new Date(Date.now() - days * 86400000).toISOString();
+
+  try {
+    const [messagesByDay, newUsersByDay] = await Promise.all([
+      env.DB.prepare(
+        `SELECT substr(ts, 1, 10) AS day, COUNT(*) AS n
+         FROM events WHERE ts >= ?1
+         GROUP BY day ORDER BY day`
+      )
+        .bind(cutoff)
+        .all(),
+      env.DB.prepare(
+        `SELECT substr(first_seen, 1, 10) AS day, COUNT(*) AS n
+         FROM users WHERE first_seen >= ?1
+         GROUP BY day ORDER BY day`
+      )
+        .bind(cutoff)
+        .all(),
+    ]);
+
+    // Merge both series onto a single zero-filled list of every day in range,
+    // so the chart doesn't have to reason about missing dates.
+    const msgMap = new Map(messagesByDay.results.map((r) => [r.day, r.n]));
+    const newUserMap = new Map(newUsersByDay.results.map((r) => [r.day, r.n]));
+
+    const series = [];
+    for (let i = days - 1; i >= 0; i--) {
+      const d = new Date(Date.now() - i * 86400000).toISOString().slice(0, 10);
+      series.push({
+        date: d,
+        messages: msgMap.get(d) || 0,
+        new_users: newUserMap.get(d) || 0,
+      });
+    }
+
+    return new Response(JSON.stringify({ period_days: days, series }, null, 2), {
       headers: { "Content-Type": "application/json", ...STATS_CORS_HEADERS },
     });
   } catch (err) {
