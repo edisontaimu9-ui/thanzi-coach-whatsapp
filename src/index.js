@@ -638,11 +638,18 @@ async function handleAudioMessage(audio, from, env, ctx) {
 // Groq Whisper transcription. whisper-large-v3 (not the -turbo variant) is
 // used here rather than the faster/cheaper turbo model because accuracy
 // matters more than latency for a single short voice note, and turbo's
-// multilingual accuracy is measurably weaker — relevant since callers here
-// commonly code-switch between English and Chichewa in the same sentence.
-// No `language` param is sent, letting Whisper auto-detect rather than
-// forcing English, which would hurt Chichewa words. Returns the transcript
-// text, or null if nothing usable came back.
+// multilingual accuracy is measurably weaker.
+//
+// `language: "en"` is forced even though callers commonly code-switch into
+// Chichewa — Whisper doesn't have solid Chichewa support to begin with, and
+// leaving language on auto-detect let a short/ambiguous clip get
+// misidentified as an entirely different language, hallucinating
+// nonsense in the WRONG SCRIPT (e.g. Cyrillic) rather than failing
+// cleanly. Forcing English keeps it constrained to Latin-script output
+// even when it mishears a Chichewa word, which mangles that word but
+// stays recoverable — vs. a free-associated wrong-language hallucination,
+// which isn't. looksLikeTranscriptionGarbage below is a second guard for
+// whatever still gets through.
 async function transcribeAudio(bytes, mimeType, env) {
   const cleanMimeType = (mimeType || "audio/ogg").split(";")[0].trim();
   const extension = cleanMimeType.includes("mp4") || cleanMimeType.includes("m4a")
@@ -657,6 +664,7 @@ async function transcribeAudio(bytes, mimeType, env) {
   form.append("file", new Blob([bytes], { type: cleanMimeType }), `voice.${extension}`);
   form.append("model", "whisper-large-v3");
   form.append("response_format", "json");
+  form.append("language", "en");
   // Biases transcription toward correct spelling of local food/clinical
   // terms Whisper wouldn't otherwise recognize well.
   form.append(
@@ -679,7 +687,18 @@ async function transcribeAudio(bytes, mimeType, env) {
 
   const body = await res.json();
   const text = body?.text?.trim();
-  return text || null;
+  if (!text || looksLikeTranscriptionGarbage(text)) return null;
+  return text;
+}
+
+// Catches the specific hallucination failure mode above: a transcript that
+// came back in a script no caller of this bot would plausibly be using
+// (Cyrillic, CJK, Arabic, etc.), which is a sign Whisper guessed the wrong
+// language for the clip rather than an actual utterance to act on.
+function looksLikeTranscriptionGarbage(text) {
+  return /[\u0400-\u04FF\u0370-\u03FF\u0590-\u08FF\u4E00-\u9FFF\u3040-\u30FF\uAC00-\uD7AF]/.test(
+    text
+  );
 }
 
 // --- Local barcode decoding (ZXing-C++ compiled to WASM) ---
