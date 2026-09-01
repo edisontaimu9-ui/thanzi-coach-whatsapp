@@ -377,15 +377,29 @@ function detectFoodQuantity(query) {
   return null;
 }
 
-// Filler words allowed in a "just a gram amount" follow-up — e.g.
-// "Calculate for 50g serving", "scale to 200g please". If any OTHER word
-// remains after stripping the gram token and these fillers, the message
-// names an actual food and isn't a bare follow-up (detectFoodQuantity
-// above handles that case).
+// Filler words allowed in a "no food name, just a quantity" follow-up —
+// covers both direct forms ("Calculate for 50g serving", "scale to 200g
+// please") AND natural pronoun-referenced questions about whatever was
+// just discussed ("How much can it provide in 100g?", "What's in 100g of
+// that?", "How much does it have per 100g"). If any OTHER word remains
+// after stripping the gram token and these fillers, the message names an
+// actual food and isn't a bare follow-up (detectFoodQuantity above
+// handles that case) — so it's safe to be generous here: a genuine
+// question with a real food name in it ("how much protein does chicken
+// have in 100g") still leaves "chicken" behind and correctly falls
+// through instead of being swallowed.
 const SERVING_ONLY_FILLERS = new Set([
   "calculate", "calc", "compute", "scale", "convert", "recalculate",
-  "show", "give", "make", "it", "for", "to", "a", "an", "the", "of",
-  "me", "please", "now", "serving", "portion", "size", "amount", "sized",
+  "show", "shows", "give", "gives", "giving", "make", "for", "to", "a",
+  "an", "the", "of", "me", "please", "now", "serving", "portion", "size",
+  "sized", "amount", "quantity", "total",
+  // pronoun/question forms referring to a food already discussed
+  "how", "much", "many", "can", "could", "would", "will", "does", "do",
+  "did", "is", "are", "was", "were", "has", "have", "had", "it", "its",
+  "that", "this", "there", "in", "per", "out", "provide", "provides",
+  "providing", "provided", "contain", "contains", "containing",
+  "supply", "supplies", "supplying", "offer", "offers", "deliver",
+  "delivers", "what", "whats",
 ]);
 
 function detectServingOnly(query) {
@@ -397,7 +411,7 @@ function detectServingOnly(query) {
   const withoutGram = query.slice(0, gramMatch.index) + query.slice(gramMatch.index + gramMatch[0].length);
   const words = withoutGram
     .toLowerCase()
-    .replace(/[?.!,]/g, "")
+    .replace(/[?.!,']/g, "")
     .split(/\s+/)
     .filter(Boolean);
   const namesAFood = words.some((w) => !SERVING_ONLY_FILLERS.has(w));
