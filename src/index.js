@@ -114,9 +114,9 @@ async function handleIncomingMessage(request, env, ctx) {
 
   try {
     if (message.type === "text") {
-      await handleTextMessage(message.text.body, from, env);
+      await handleTextMessage(message.text.body, from, env, ctx);
     } else if (message.type === "image") {
-      await handleImageMessage(message.image, from, env);
+      await handleImageMessage(message.image, from, env, ctx);
     } else if (message.type === "interactive") {
       // A tapped list row/button — its id carries the full prompt text (see
       // sendPromptList), so route it through the exact same pipeline as if
@@ -125,7 +125,7 @@ async function handleIncomingMessage(request, env, ctx) {
       const tapped =
         message.interactive?.list_reply?.id || message.interactive?.button_reply?.id;
       if (tapped) {
-        await handleTextMessage(tapped, from, env);
+        await handleTextMessage(tapped, from, env, ctx);
       } else {
         return new Response("OK", { status: 200 });
       }
@@ -199,7 +199,7 @@ function detectGreetingLanguage(text) {
   return null;
 }
 
-async function handleTextMessage(userText, from, env) {
+async function handleTextMessage(userText, from, env, ctx) {
   const greetingLang = detectGreetingLanguage(userText);
   if (greetingLang) {
     await sendPromptList(from, greetingLang, env);
@@ -208,9 +208,10 @@ async function handleTextMessage(userText, from, env) {
 
   if (looksLikeBarcode(userText)) {
     const barcode = userText.trim();
-    const product = await lookupBarcode(barcode, env);
-    if (product) {
-      await sendWhatsAppReply(from, product, env);
+    const found = await lookupBarcode(barcode, env);
+    if (found) {
+      await sendWhatsAppReply(from, found.text, env);
+      ctx.waitUntil(saveLastFoodContext(from, toFoodContext(found.item), env));
       return;
     }
     // No product found for that barcode — fall through to rag/ask, which
@@ -241,9 +242,32 @@ async function handleTextMessage(userText, from, env) {
   if (foodQty) {
     const scaled = await answerFoodQuantity(foodQty.food, foodQty.grams, env);
     if (scaled) {
-      await sendWhatsAppReply(from, scaled, env);
+      await sendWhatsAppReply(from, scaled.text, env);
+      ctx.waitUntil(saveLastFoodContext(from, scaled.context, env));
       return;
     }
+  }
+
+  // A bare gram amount with no food name at all ("Calculate for 50g
+  // serving", "50g", "scale to 200g") is a follow-up on whatever food was
+  // just discussed, NOT a new question — but /rag/ask has no reliable
+  // memory of which food or reference amount that was (its session-based
+  // memory can silently pick a different reference between calls for the
+  // same food, giving inconsistent answers for the same request). Recompute
+  // it ourselves from the last food we resolved for this user, with real
+  // arithmetic against the SAME base measure every time.
+  const servingOnly = detectServingOnly(userText);
+  if (servingOnly) {
+    const context = await getLastFoodContext(from, env);
+    if (context) {
+      const scaled = scaleFoodToGrams(context, servingOnly.grams);
+      if (scaled) {
+        await sendWhatsAppReply(from, scaled, env);
+        return;
+      }
+    }
+    // No recent food on file (or it's too old/unscalable) — fall through
+    // to bare-food-name / rag/ask below, same as any other message.
   }
 
   // A bare food name ("Quinoa", "Soya pieces") is really a lookup, not a
@@ -258,6 +282,8 @@ async function handleTextMessage(userText, from, env) {
     const card = formatFoodResult(item);
     if (card) {
       await sendWhatsAppReply(from, card, env);
+      const context = toFoodContext(item);
+      if (context) ctx.waitUntil(saveLastFoodContext(from, context, env));
       return;
     }
   }
@@ -351,6 +377,127 @@ function detectFoodQuantity(query) {
   return null;
 }
 
+// Filler words allowed in a "just a gram amount" follow-up — e.g.
+// "Calculate for 50g serving", "scale to 200g please". If any OTHER word
+// remains after stripping the gram token and these fillers, the message
+// names an actual food and isn't a bare follow-up (detectFoodQuantity
+// above handles that case).
+const SERVING_ONLY_FILLERS = new Set([
+  "calculate", "calc", "compute", "scale", "convert", "recalculate",
+  "show", "give", "make", "it", "for", "to", "a", "an", "the", "of",
+  "me", "please", "now", "serving", "portion", "size", "amount", "sized",
+]);
+
+function detectServingOnly(query) {
+  const gramMatch = query.match(/(\d+(?:\.\d+)?)\s*g(?:rams)?\b/i);
+  if (!gramMatch) return null;
+  const grams = Number(gramMatch[1]);
+  if (!(grams > 0 && grams < 10000)) return null;
+
+  const withoutGram = query.slice(0, gramMatch.index) + query.slice(gramMatch.index + gramMatch[0].length);
+  const words = withoutGram
+    .toLowerCase()
+    .replace(/[?.!,]/g, "")
+    .split(/\s+/)
+    .filter(Boolean);
+  const namesAFood = words.some((w) => !SERVING_ONLY_FILLERS.has(w));
+  if (namesAFood) return null;
+
+  return { grams };
+}
+
+// Extracts the durable bits of a food record we need to re-scale it later
+// (name, its reference gram amount, and its macros AT that reference
+// amount) — this is what gets persisted as "last food discussed" via
+// saveLastFoodContext, and re-scaled by scaleFoodToGrams on a bare
+// follow-up like "50g". Same base-grams derivation as answerFoodQuantity:
+// only a gram-based measure can be linearly scaled, so non-gram units
+// (cups, tablespoons) fall back to the 100g default like everywhere else
+// in this file.
+function toFoodContext(item) {
+  if (!item) return null;
+  const name = item.product_name || item.food_name || item.name;
+  if (!name) return null;
+
+  const rawMeasure = item.measure || item.raw_data?.quantity;
+  const measureGramsMatch = rawMeasure ? rawMeasure.match(/(\d+(?:\.\d+)?)\s*g\b/i) : null;
+  const baseGrams = measureGramsMatch ? Number(measureGramsMatch[1]) : 100;
+  if (!baseGrams) return null;
+
+  return {
+    name,
+    baseGrams,
+    kcal: item.kcal ?? item.energy_kcal,
+    protein: item.protein_g,
+    carbs: item.carbs_g,
+    fat: item.fat_g,
+  };
+}
+
+// Scales a saved food context (see toFoodContext) to a target gram amount
+// with real arithmetic — no LLM, no RAG round-trip, so the SAME food
+// always yields the SAME numbers for the SAME requested weight, call after
+// call. Mirrors answerFoodQuantity's math exactly.
+function scaleFoodToGrams(context, grams) {
+  if (!context?.baseGrams) return null;
+  const factor = grams / context.baseGrams;
+  const scale = (v) => (v == null ? null : Math.round(v * factor * 10) / 10);
+
+  const kcal = scale(context.kcal);
+  const protein = scale(context.protein);
+  const carbs = scale(context.carbs);
+  const fat = scale(context.fat);
+
+  const macros = [];
+  if (kcal != null) macros.push(`${kcal} kcal`);
+  if (protein != null) macros.push(`${protein}g protein`);
+  if (carbs != null) macros.push(`${carbs}g carbs`);
+  if (fat != null) macros.push(`${fat}g fat`);
+  if (!macros.length) return null;
+
+  return `*${context.name}* — ${grams} g\n${macros.join(", ")}`;
+}
+
+// How long a "last food discussed" context stays usable for a bare
+// follow-up like "50g" before we consider the conversation to have moved
+// on. Keeps a stale context from a food discussed hours ago from
+// hijacking an unrelated later message.
+const LAST_FOOD_CONTEXT_TTL_MS = 20 * 60 * 1000; // 20 minutes
+
+async function saveLastFoodContext(whatsappId, context, env) {
+  if (!context) return;
+  try {
+    await env.DB.prepare(
+      `INSERT INTO last_food_context (whatsapp_id, food_json, updated_at)
+       VALUES (?1, ?2, ?3)
+       ON CONFLICT(whatsapp_id) DO UPDATE SET
+         food_json = ?2,
+         updated_at = ?3`
+    )
+      .bind(whatsappId, JSON.stringify(context), new Date().toISOString())
+      .run();
+  } catch (err) {
+    console.error("Failed to save last food context:", err);
+  }
+}
+
+async function getLastFoodContext(whatsappId, env) {
+  try {
+    const row = await env.DB.prepare(
+      `SELECT food_json, updated_at FROM last_food_context WHERE whatsapp_id = ?1`
+    )
+      .bind(whatsappId)
+      .first();
+    if (!row) return null;
+    const age = Date.now() - new Date(row.updated_at).getTime();
+    if (age > LAST_FOOD_CONTEXT_TTL_MS) return null;
+    return JSON.parse(row.food_json);
+  } catch (err) {
+    console.error("Failed to load last food context:", err);
+    return null;
+  }
+}
+
 // Looks up a food's per-100g-equivalent record, then scales its kcal/
 // protein/carbs/fat by real arithmetic to the requested gram amount — no
 // LLM involved, so it's both exact and avoids Chakudya's RAG pipeline
@@ -361,35 +508,19 @@ function detectFoodQuantity(query) {
 // cases return null and fall back to /rag/ask instead.
 async function answerFoodQuantity(food, grams, env) {
   const item = await lookupFoodByName(food, env);
-  if (!item) return null;
+  const context = toFoodContext(item);
+  if (!context) return null;
 
-  const name = item.product_name || item.food_name || item.name;
-  if (!name) return null;
+  const text = scaleFoodToGrams(context, grams);
+  if (!text) return null;
 
-  const rawMeasure = item.measure || item.raw_data?.quantity;
-  const measureGramsMatch = rawMeasure ? rawMeasure.match(/(\d+(?:\.\d+)?)\s*g\b/i) : null;
-  const baseGrams = measureGramsMatch ? Number(measureGramsMatch[1]) : 100; // our own default
-  if (!baseGrams) return null;
-
-  const factor = grams / baseGrams;
-  const scale = (v) => (v == null ? null : Math.round(v * factor * 10) / 10);
-
-  const kcal = scale(item.kcal ?? item.energy_kcal);
-  const protein = scale(item.protein_g);
-  const carbs = scale(item.carbs_g);
-  const fat = scale(item.fat_g);
-
-  const macros = [];
-  if (kcal != null) macros.push(`${kcal} kcal`);
-  if (protein != null) macros.push(`${protein}g protein`);
-  if (carbs != null) macros.push(`${carbs}g carbs`);
-  if (fat != null) macros.push(`${fat}g fat`);
-  if (!macros.length) return null;
-
-  return `*${name}* — ${grams} g\n${macros.join(", ")}`;
+  // Return the context alongside the text so the caller can remember this
+  // as "the food we're currently talking about" (see saveLastFoodContext)
+  // — a later bare "50g" from the same user re-scales THIS food, exactly.
+  return { text, context };
 }
 
-async function handleImageMessage(image, from, env) {
+async function handleImageMessage(image, from, env, ctx) {
   const mediaId = image?.id;
   if (!mediaId) {
     await sendWhatsAppReply(
@@ -413,18 +544,20 @@ async function handleImageMessage(image, from, env) {
   // this way one photo handles either case automatically.
   const barcode = await readBarcodeFromImage(base64, mimeType, env);
   if (barcode) {
-    const product = await lookupBarcode(barcode, env);
+    const found = await lookupBarcode(barcode, env);
     await sendWhatsAppReply(
       from,
-      product ||
+      found?.text ||
         `Ndawerenga barcode ${barcode}, koma sindinapeze mankhwala ake m'databasi. 🙏`,
       env
     );
+    if (found) ctx.waitUntil(saveLastFoodContext(from, toFoodContext(found.item), env));
     return;
   }
 
   const result = await scanPackagedLabel(base64, mimeType, env);
-  await sendWhatsAppReply(from, result, env);
+  await sendWhatsAppReply(from, result.text, env);
+  if (result.context) ctx.waitUntil(saveLastFoodContext(from, result.context, env));
 }
 
 // Direct Groq vision call (independent of Chakudya) specifically to read
@@ -550,11 +683,14 @@ async function scanPackagedLabel(base64, mimeType, env) {
   });
 
   if (res.status === 422) {
-    return "Sindinathe kuwerenga zambiri pa chithunzichi. Chonde jambulani bwino chizindikiro cha zakudya (nutrition label) ndikutumizanso. 🙏";
+    return {
+      text: "Sindinathe kuwerenga zambiri pa chithunzichi. Chonde jambulani bwino chizindikiro cha zakudya (nutrition label) ndikutumizanso. 🙏",
+      context: null,
+    };
   }
   if (isProviderUnavailable(res.status)) {
     console.error("Packaged scan provider unavailable:", res.status, await res.text());
-    return LLM_BUSY_MESSAGE;
+    return { text: LLM_BUSY_MESSAGE, context: null };
   }
   if (!res.ok) {
     throw new Error(`Packaged scan error: ${res.status} ${await res.text()}`);
@@ -564,9 +700,12 @@ async function scanPackagedLabel(base64, mimeType, env) {
   const result = formatFoodResult(body?.data);
   if (result && looksLikeLeakedProviderError(result)) {
     console.error("Packaged scan leaked a provider error:", result);
-    return SUBREQUEST_LIMIT_MESSAGE;
+    return { text: SUBREQUEST_LIMIT_MESSAGE, context: null };
   }
-  return result || "Ndawerenga chithunzicho, koma sindinapeze zambiri zokwanira.";
+  return {
+    text: result || "Ndawerenga chithunzicho, koma sindinapeze zambiri zokwanira.",
+    context: toFoodContext(body?.data),
+  };
 }
 
 async function lookupBarcode(barcode, env) {
@@ -580,7 +719,11 @@ async function lookupBarcode(barcode, env) {
   // A barcode lookup returns `data` as a single object; a name search
   // (q=...) returns `data` as an array. Handle both.
   const item = Array.isArray(body?.data) ? body.data[0] : body?.data;
-  return item ? formatFoodResult(item) : null;
+  if (!item) return null;
+  const text = formatFoodResult(item);
+  // Return the raw item too (not just the formatted card) so callers can
+  // remember it as "last food discussed" — see toFoodContext/saveLastFoodContext.
+  return text ? { item, text } : null;
 }
 
 // Formats a Food/PackagedFood/external-lookup result (field names vary by
