@@ -1053,21 +1053,21 @@ async function sendWhatsAppReply(to, text, env) {
 // the interactive-message handling in handleIncomingMessage), while title
 // stays short to fit WhatsApp's 24-char row title limit.
 const PROMPT_EXAMPLES_EN = [
-  { id: "What foods are high in iron?", title: "High-iron foods" },
-  { id: "Compare nsima and rice", title: "Compare two foods" },
-  { id: "Exchange list for a diabetic patient", title: "Diabetic exchange list" },
-  { id: "What should I feed my child if they are malnourished?", title: "Child malnutrition" },
-  { id: "Quinoa", title: "Look up a food" },
-  { id: "quinoa 200g", title: "Nutrition for a weight" },
+  { id: "What foods are high in iron?", title: "Iron-Rich Foods" },
+  { id: "Compare nsima and rice", title: "Nsima vs Rice" },
+  { id: "Exchange list for a diabetic patient", title: "Diabetes Food Swaps" },
+  { id: "What should I feed my child if they are malnourished?", title: "Feeding a Thin Child" },
+  { id: "Quinoa", title: "Look Up Any Food" },
+  { id: "quinoa 200g", title: "Nutrition by Weight" },
 ];
 
 const PROMPT_EXAMPLES_NY = [
-  { id: "Ndi zakudya ziti zomwe zili ndi iron wambiri?", title: "Zakudya za iron" },
-  { id: "Compare nsima and rice", title: "Yerekezani zakudya" },
-  { id: "Exchange list for a diabetic patient", title: "Exchange list - shuga" },
-  { id: "What should I feed my child if they are malnourished?", title: "Kudyetsa mwana wowonda" },
-  { id: "Quinoa", title: "Funsani za chakudya" },
-  { id: "quinoa 200g", title: "Zambiri pa kulemera" },
+  { id: "Ndi zakudya ziti zomwe zili ndi iron wambiri?", title: "Zakudya za Iron" },
+  { id: "Compare nsima and rice", title: "Nsima kapena Mpunga" },
+  { id: "Exchange list for a diabetic patient", title: "Kudya kwa Shuga" },
+  { id: "What should I feed my child if they are malnourished?", title: "Kudyetsa Mwana" },
+  { id: "Quinoa", title: "Funsani Chakudya" },
+  { id: "quinoa 200g", title: "Kulemera kwa Chakudya" },
 ];
 
 async function sendPromptList(to, lang, env) {
