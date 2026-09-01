@@ -42,6 +42,9 @@
  *   -> 429 rate limited, with Retry-After header
  */
 
+import zxingReaderWasmModule from "zxing-wasm/dist/reader/zxing_reader.wasm";
+import { prepareZXingModule, readBarcodes } from "zxing-wasm/reader";
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -551,12 +554,19 @@ async function handleImageMessage(image, from, env, ctx) {
     env
   ).catch(() => {}); // best-effort progress ping; not fatal if it fails
 
-  const { base64, mimeType } = await downloadWhatsAppMedia(mediaId, env);
+  const { base64, bytes, mimeType } = await downloadWhatsAppMedia(mediaId, env);
 
-  // Try reading it as a barcode first (fast, cheap, precise task). Only if
-  // no barcode is found do we fall back to Chakudya's nutrition-label OCR —
-  // this way one photo handles either case automatically.
-  const barcode = await readBarcodeFromImage(base64, mimeType, env);
+  // Try reading it as a barcode first (fast, cheap, precise task). A local
+  // ZXing decode runs first — free, instant, no image data leaves
+  // Cloudflare — and only if that finds nothing do we fall back to the
+  // Groq vision reader, which is slower/costlier but more forgiving of
+  // blur, glare, or an off-angle shot. Only if BOTH find no barcode do we
+  // fall back further to Chakudya's nutrition-label OCR — this way one
+  // photo handles either case (barcode or label) automatically.
+  let barcode = await decodeBarcodeLocally(bytes);
+  if (!barcode) {
+    barcode = await readBarcodeFromImage(base64, mimeType, env);
+  }
   if (barcode) {
     const found = await lookupBarcode(barcode, env);
     await sendWhatsAppReply(
@@ -572,6 +582,61 @@ async function handleImageMessage(image, from, env, ctx) {
   const result = await scanPackagedLabel(base64, mimeType, env);
   await sendWhatsAppReply(from, result.text, env);
   if (result.context) ctx.waitUntil(saveLastFoodContext(from, result.context, env));
+}
+
+// --- Local barcode decoding (ZXing-C++ compiled to WASM) ---
+//
+// Runs entirely inside the Worker: no external API call, no per-image cost,
+// no round-trip latency, and no image data leaves Cloudflare's network. This
+// is tried FIRST on every photo, before the Groq vision fallback below —
+// it handles the vast majority of clear, reasonably-framed barcode photos
+// deterministically. ZXing-C++'s bundled stb_image decoder reads the raw
+// JPEG/PNG bytes directly, so no separate image-decoding step is needed.
+//
+// The WASM module is instantiated once per Worker isolate (module-level
+// state persists across requests handled by the same isolate) and reused.
+let zxingModuleReady = false;
+function ensureZxingReady() {
+  if (zxingModuleReady) return;
+  prepareZXingModule({
+    overrides: {
+      instantiateWasm(imports, successCallback) {
+        // `zxingReaderWasmModule` is already a compiled WebAssembly.Module
+        // (Workers/wrangler compiles .wasm imports at build time), so
+        // WebAssembly.instantiate(module, imports) resolves directly to an
+        // Instance — unlike the BufferSource overload, there's no
+        // `.instance` to unwrap here.
+        WebAssembly.instantiate(zxingReaderWasmModule, imports).then(successCallback);
+        return {};
+      },
+    },
+  });
+  zxingModuleReady = true;
+}
+
+// Barcode symbologies actually used on packaged food products. Restricting
+// to these (instead of ZXing's full symbology list, which also covers
+// QR/DataMatrix/PDF417/Aztec etc.) keeps decoding fast and avoids false
+// matches on an unrelated code that might appear in the same photo.
+const RETAIL_BARCODE_FORMATS = ["EAN-13", "EAN-8", "UPC-A", "UPC-E"];
+
+async function decodeBarcodeLocally(imageBytes) {
+  ensureZxingReady();
+  try {
+    const results = await readBarcodes(imageBytes, {
+      formats: RETAIL_BARCODE_FORMATS,
+      tryHarder: true,
+      maxNumberOfSymbols: 1,
+    });
+    const hit = results.find((r) => r.text && r.isValid !== false);
+    return hit ? hit.text : null;
+  } catch (err) {
+    // No barcode present, a corrupt/unsupported image, etc. — all expected
+    // and common. Fall back to the Groq vision reader rather than treating
+    // this as a hard failure.
+    console.error("Local ZXing decode failed:", err);
+    return null;
+  }
 }
 
 // Direct Groq vision call (independent of Chakudya) specifically to read
@@ -636,7 +701,7 @@ async function downloadWhatsAppMedia(mediaId, env) {
 
   const buf = await fileRes.arrayBuffer();
   const base64 = arrayBufferToBase64(buf);
-  return { base64, mimeType: meta.mime_type || "image/jpeg" };
+  return { base64, bytes: new Uint8Array(buf), mimeType: meta.mime_type || "image/jpeg" };
 }
 
 function arrayBufferToBase64(buf) {
