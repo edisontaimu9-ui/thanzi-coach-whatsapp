@@ -8,15 +8,21 @@
  *        - Pure digits (8-14 chars) are treated as a barcode -> /foods/lookup
  *          for instant structured product data (no LLM).
  *        - Everything else -> /rag/ask for a conversational, cited answer.
- *   4. Image messages (photo of a nutrition label) -> downloaded from
- *      WhatsApp, sent to /packaged/scan for OCR + nutrient extraction.
- *   5. Reply sent back via the WhatsApp Cloud API.
+ *   4. Image messages (photo of a nutrition label or barcode) -> local
+ *      ZXing barcode decode, then Groq vision, then Chakudya OCR (see
+ *      handleImageMessage).
+ *   5. Voice notes -> downloaded from WhatsApp, transcribed via Groq
+ *      Whisper, then routed through the SAME text pipeline as step 3
+ *      (see handleAudioMessage) — a spoken food name or question works
+ *      exactly like a typed one.
+ *   6. Reply sent back via the WhatsApp Cloud API.
  *
  * Required secrets (set with `wrangler secret put <NAME>` — never hardcode these):
  *   WHATSAPP_TOKEN         - Meta permanent/system-user access token
  *   VERIFY_TOKEN           - a string you invent; must match what you enter in
  *                            Meta App Dashboard > WhatsApp > Configuration > Webhook
- *   GROQ_API_KEY            - console.groq.com API key, for direct barcode-from-photo reads
+ *   GROQ_API_KEY            - console.groq.com API key, for direct barcode-from-photo
+ *                            reads AND voice-note transcription (Whisper)
  *   STATS_TOKEN             - a string you invent; required as ?token= on GET /stats
  *   ADMIN_PHONE             - optional; your own WhatsApp number for the daily
  *                            summary cron job (see wrangler.toml [triggers]).
@@ -111,7 +117,7 @@ async function handleIncomingMessage(request, env, ctx) {
 
   // Fire-and-forget analytics write — ctx.waitUntil lets it finish after the
   // response is sent, without slowing down or risking the actual reply.
-  if (message.type === "text" || message.type === "image" || message.type === "interactive") {
+  if (message.type === "text" || message.type === "image" || message.type === "audio" || message.type === "interactive") {
     ctx.waitUntil(recordActivity(from, message.type, env));
   }
 
@@ -120,6 +126,8 @@ async function handleIncomingMessage(request, env, ctx) {
       await handleTextMessage(message.text.body, from, env, ctx);
     } else if (message.type === "image") {
       await handleImageMessage(message.image, from, env, ctx);
+    } else if (message.type === "audio") {
+      await handleAudioMessage(message.audio, from, env, ctx);
     } else if (message.type === "interactive") {
       // A tapped list row/button — its id carries the full prompt text (see
       // sendPromptList), so route it through the exact same pipeline as if
@@ -582,6 +590,96 @@ async function handleImageMessage(image, from, env, ctx) {
   const result = await scanPackagedLabel(base64, mimeType, env);
   await sendWhatsAppReply(from, result.text, env);
   if (result.context) ctx.waitUntil(saveLastFoodContext(from, result.context, env));
+}
+
+// --- Voice notes ---
+//
+// A voice message is transcribed via Groq's Whisper API, then handed to
+// handleTextMessage exactly as if the person had typed it — every existing
+// detector (barcode, bare food name, food+quantity, serving-only follow-up,
+// comparison, RAG question) applies unchanged to the transcript.
+async function handleAudioMessage(audio, from, env, ctx) {
+  const mediaId = audio?.id;
+  if (!mediaId) {
+    await sendWhatsAppReply(
+      from,
+      "Ndilandire mawu anu, koma sindinathe kuwatsegula. Yesaninso. 🙏",
+      env
+    );
+    return;
+  }
+
+  await sendWhatsAppReply(
+    from,
+    "Ndikumvetsera mawu anu... mudikire pang'ono. 🎙️",
+    env
+  ).catch(() => {}); // best-effort progress ping; not fatal if it fails
+
+  const { bytes, mimeType } = await downloadWhatsAppMedia(mediaId, env);
+  const transcript = await transcribeAudio(bytes, mimeType, env);
+
+  if (!transcript) {
+    await sendWhatsAppReply(
+      from,
+      "Pepani, sindinamve bwino mawu anuwo. Yesaninso, kapena lembani funso lanu. 🙏",
+      env
+    );
+    return;
+  }
+
+  // Echo back what was heard BEFORE acting on it — a cheap trust-builder
+  // that lets the person catch a mis-transcription (e.g. a mangled food
+  // name) instead of silently getting an answer to the wrong question.
+  await sendWhatsAppReply(from, `_Ndamva: "${transcript}"_`, env).catch(() => {});
+
+  await handleTextMessage(transcript, from, env, ctx);
+}
+
+// Groq Whisper transcription. whisper-large-v3 (not the -turbo variant) is
+// used here rather than the faster/cheaper turbo model because accuracy
+// matters more than latency for a single short voice note, and turbo's
+// multilingual accuracy is measurably weaker — relevant since callers here
+// commonly code-switch between English and Chichewa in the same sentence.
+// No `language` param is sent, letting Whisper auto-detect rather than
+// forcing English, which would hurt Chichewa words. Returns the transcript
+// text, or null if nothing usable came back.
+async function transcribeAudio(bytes, mimeType, env) {
+  const cleanMimeType = (mimeType || "audio/ogg").split(";")[0].trim();
+  const extension = cleanMimeType.includes("mp4") || cleanMimeType.includes("m4a")
+    ? "m4a"
+    : cleanMimeType.includes("mpeg") || cleanMimeType.includes("mp3")
+      ? "mp3"
+      : cleanMimeType.includes("wav")
+        ? "wav"
+        : "ogg"; // WhatsApp voice notes are audio/ogg; codecs=opus by default
+
+  const form = new FormData();
+  form.append("file", new Blob([bytes], { type: cleanMimeType }), `voice.${extension}`);
+  form.append("model", "whisper-large-v3");
+  form.append("response_format", "json");
+  // Biases transcription toward correct spelling of local food/clinical
+  // terms Whisper wouldn't otherwise recognize well.
+  form.append(
+    "prompt",
+    "Malawian food and nutrition terms: nsima, chimanga, phala, mgaiwa, futali, " +
+      "chambiko, thobwa, kondowole, mbatata, nyemba, nkhwani, chinangwa, khobwe, " +
+      "kcal, protein, carbs, fat, exchange list, renal diet, potassium, sodium."
+  );
+
+  const res = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${env.GROQ_API_KEY}` },
+    body: form,
+  });
+
+  if (!res.ok) {
+    console.error("Groq transcription error:", res.status, await res.text());
+    return null;
+  }
+
+  const body = await res.json();
+  const text = body?.text?.trim();
+  return text || null;
 }
 
 // --- Local barcode decoding (ZXing-C++ compiled to WASM) ---
