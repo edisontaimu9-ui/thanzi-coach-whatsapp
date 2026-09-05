@@ -456,6 +456,11 @@ function toFoodContext(item) {
     protein: item.protein_g,
     carbs: item.carbs_g,
     fat: item.fat_g,
+    fiber: item.fiber_g,
+    sodium: item.sodium_mg,
+    potassium: item.potassium_mg,
+    calcium: item.calcium_mg,
+    iron: item.iron_mg,
   };
 }
 
@@ -472,6 +477,11 @@ function scaleFoodToGrams(context, grams) {
   const protein = scale(context.protein);
   const carbs = scale(context.carbs);
   const fat = scale(context.fat);
+  const fiber = scale(context.fiber);
+  const sodium = scale(context.sodium);
+  const potassium = scale(context.potassium);
+  const calcium = scale(context.calcium);
+  const iron = scale(context.iron);
 
   const macros = [];
   if (kcal != null) macros.push(`${kcal} kcal`);
@@ -480,7 +490,16 @@ function scaleFoodToGrams(context, grams) {
   if (fat != null) macros.push(`${fat}g fat`);
   if (!macros.length) return null;
 
-  return `*${context.name}* — ${grams} g\n${macros.join(", ")}`;
+  const micros = [];
+  if (fiber != null) micros.push(`Fiber ${fiber}g`);
+  if (sodium != null) micros.push(`Sodium ${sodium}mg`);
+  if (potassium != null) micros.push(`Potassium ${potassium}mg`);
+  if (calcium != null) micros.push(`Calcium ${calcium}mg`);
+  if (iron != null) micros.push(`Iron ${iron}mg`);
+
+  const lines = [`*${context.name}* — ${grams} g`, macros.join(", ")];
+  if (micros.length) lines.push(micros.join(", "));
+  return lines.join("\n");
 }
 
 // How long a "last food discussed" context stays usable for a bare
@@ -941,6 +960,15 @@ function formatFoodResult(item) {
   const protein = item.protein_g;
   const carbs = item.carbs_g;
   const fat = item.fat_g;
+  // The "necessary micros" — the handful of micronutrients most relevant
+  // to everyday public-health concerns (blood pressure, bone health,
+  // anemia, digestion) — rather than the full FCT panel, to keep the
+  // WhatsApp card short. Full panel is available via /foods/:id if needed.
+  const fiber = item.fiber_g;
+  const sodium = item.sodium_mg;
+  const potassium = item.potassium_mg;
+  const calcium = item.calcium_mg;
+  const iron = item.iron_mg;
 
   const macros = [];
   if (kcal != null) macros.push(`${kcal} kcal`);
@@ -948,8 +976,16 @@ function formatFoodResult(item) {
   if (carbs != null) macros.push(`${carbs}g carbs`);
   if (fat != null) macros.push(`${fat}g fat`);
 
+  const micros = [];
+  if (fiber != null) micros.push(`Fiber ${fiber}g`);
+  if (sodium != null) micros.push(`Sodium ${sodium}mg`);
+  if (potassium != null) micros.push(`Potassium ${potassium}mg`);
+  if (calcium != null) micros.push(`Calcium ${calcium}mg`);
+  if (iron != null) micros.push(`Iron ${iron}mg`);
+
   const lines = [`*${name}*${brand}${measureText}`];
   if (macros.length) lines.push(macros.join(", "));
+  if (micros.length) lines.push(micros.join(", "));
   return lines.join("\n");
 }
 
