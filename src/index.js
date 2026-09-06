@@ -16,6 +16,12 @@
  *      (see handleAudioMessage) — a spoken food name or question works
  *      exactly like a typed one.
  *   6. Reply sent back via the WhatsApp Cloud API.
+ *   7. Food diary: "log it" / "log 150g" / "log it as dinner" saves the
+ *      most recently discussed food to chakudya-api's /log (food_log_entries),
+ *      keyed by WhatsApp number as user_id; "today" / "this week" reads it
+ *      back via /log/summary. See detectLogCommand/detectLogSummaryCommand.
+ *      No new D1 table needed — piggybacks on the existing
+ *      last_food_context row already used for gram-based follow-ups.
  *
  * Required secrets (set with `wrangler secret put <NAME>` — never hardcode these):
  *   WHATSAPP_TOKEN         - Meta permanent/system-user access token
@@ -217,6 +223,55 @@ async function handleTextMessage(userText, from, env, ctx) {
     return;
   }
 
+  // "today" / "this week" — food diary summary. Checked before anything
+  // else short-circuits on these exact phrases (see LOG_SUMMARY_*_PHRASES).
+  const summaryCmd = detectLogSummaryCommand(userText);
+  if (summaryCmd) {
+    const summary = await getLogSummary({ whatsappId: from, period: summaryCmd.period, env });
+    if (summary) {
+      const text = summaryCmd.period === "weekly" ? formatWeeklySummary(summary) : formatDailySummary(summary);
+      await sendWhatsAppReply(from, text, env);
+      return;
+    }
+    await sendWhatsAppReply(from, "Sindinathe kupeza zolembedwa zanu pa nthawi ino. Chonde yesaninso. 🙏", env);
+    return;
+  }
+
+  // "log it" / "log 150g" / "log it as dinner" — save the most recently
+  // discussed food (see last_food_context) to the diary. Only fires on a
+  // narrow set of phrasings (see detectLogCommand); anything naming a food
+  // directly falls through to the normal flow below instead.
+  const logCmd = detectLogCommand(userText);
+  if (logCmd) {
+    const context = await getLastFoodContext(from, env);
+    if (!context) {
+      await sendWhatsAppReply(
+        from,
+        "Ndikanakonda kudziwa chakudya choyamba — tumizani dzina la chakudya kaye, kenako muzitha kunena \"log it\". 🙏",
+        env
+      );
+      return;
+    }
+    const grams = logCmd.grams ?? context.lastShownGrams ?? context.baseGrams;
+    const calories = kcalAtGrams(context, grams);
+    if (calories == null) {
+      await sendWhatsAppReply(from, "Sindinathe kuwerengera ma calories a chakudyachi. Chonde yesaninso. 🙏", env);
+      return;
+    }
+    const mealType = logCmd.mealType || inferMealTypeFromHour(currentHourInMalawi());
+    const logged = await logFoodEntry({ whatsappId: from, mealType, calories, foodName: context.name, env });
+    if (logged) {
+      await sendWhatsAppReply(
+        from,
+        `Logged: *${context.name}* (${grams} g, ${calories} kcal) under ${MEAL_LABELS[mealType]}. ✅\nSay "today" any time to see your daily total.`,
+        env
+      );
+    } else {
+      await sendWhatsAppReply(from, "Sindinathe kulemba izi pa nthawi ino. Chonde yesaninso. 🙏", env);
+    }
+    return;
+  }
+
   if (looksLikeBarcode(userText)) {
     const barcode = userText.trim();
     const found = await lookupBarcode(barcode, env);
@@ -254,7 +309,9 @@ async function handleTextMessage(userText, from, env, ctx) {
     const scaled = await answerFoodQuantity(foodQty.food, foodQty.grams, env);
     if (scaled) {
       await sendWhatsAppReply(from, scaled.text, env);
-      ctx.waitUntil(saveLastFoodContext(from, scaled.context, env));
+      ctx.waitUntil(
+        saveLastFoodContext(from, { ...scaled.context, lastShownGrams: foodQty.grams }, env)
+      );
       return;
     }
   }
@@ -274,6 +331,9 @@ async function handleTextMessage(userText, from, env, ctx) {
       const scaled = scaleFoodToGrams(context, servingOnly.grams);
       if (scaled) {
         await sendWhatsAppReply(from, scaled, env);
+        ctx.waitUntil(
+          saveLastFoodContext(from, { ...context, lastShownGrams: servingOnly.grams }, env)
+        );
         return;
       }
     }
@@ -431,6 +491,142 @@ function detectServingOnly(query) {
   return { grams };
 }
 
+// --- Food diary (chakudya-api's /log and /log/summary) ---
+//
+// "log it" / "log 150g" / "log it as dinner" saves whatever food was most
+// recently discussed (see last_food_context) as a diary entry. Deliberately
+// narrow in what it accepts: the message must start with an explicit
+// log/save/record/add verb, and everything else in it must be either a
+// gram amount, a meal-type word, or one of a short list of filler words
+// ("it", "this", "to", "my", "diary", ...) — if anything else is left over
+// (e.g. "log my rice porridge", naming a food directly rather than
+// referring to one already discussed), this returns null and the message
+// falls through to the normal flow instead of silently mis-logging or
+// swallowing what might actually be a real question.
+const LOG_MEAL_TYPES = ["breakfast", "lunch", "dinner", "snack"];
+const LOG_FILLER_WORDS = new Set([
+  "log", "save", "record", "add", "it", "this", "that", "to", "my", "the",
+  "diary", "food", "as", "please", "now", "in",
+]);
+
+function detectLogCommand(text) {
+  const t = text.trim();
+  if (!/^(log|save|record|add)\b/i.test(t)) return null;
+
+  let grams = null;
+  let withoutGrams = t;
+  const gramMatch = t.match(/(\d+(?:\.\d+)?)\s*g(?:rams)?\b/i);
+  if (gramMatch) {
+    grams = Number(gramMatch[1]);
+    if (!(grams > 0 && grams < 10000)) return null;
+    withoutGrams = t.slice(0, gramMatch.index) + t.slice(gramMatch.index + gramMatch[0].length);
+  }
+
+  let mealType = null;
+  const words = withoutGrams
+    .toLowerCase()
+    .replace(/[?.!,]/g, "")
+    .split(/\s+/)
+    .filter(Boolean);
+
+  const leftover = words.filter((w) => {
+    if (LOG_MEAL_TYPES.includes(w)) {
+      mealType = w;
+      return false;
+    }
+    return !LOG_FILLER_WORDS.has(w);
+  });
+  if (leftover.length > 0) return null;
+
+  return { grams, mealType };
+}
+
+// "today" / "my log" / "this week" — exact-phrase allowlist (not a
+// substring match) so a real question that happens to contain "today"
+// ("How many calories should I eat today?") is left alone and still goes
+// to /rag/ask instead of being swallowed here.
+const LOG_SUMMARY_DAILY_PHRASES = new Set([
+  "today", "my log", "food log", "my diary", "diary", "today's log",
+  "daily summary", "log summary", "show my log", "show my diary",
+  "what did i eat today", "what have i eaten today",
+]);
+const LOG_SUMMARY_WEEKLY_PHRASES = new Set([
+  "this week", "weekly summary", "week summary", "my week",
+  "this week's log", "what did i eat this week",
+]);
+
+function detectLogSummaryCommand(text) {
+  const t = text.trim().toLowerCase().replace(/[?.!]+$/, "");
+  if (LOG_SUMMARY_WEEKLY_PHRASES.has(t)) return { period: "weekly" };
+  if (LOG_SUMMARY_DAILY_PHRASES.has(t)) return { period: "daily" };
+  return null;
+}
+
+// Malawi runs on CAT (UTC+2) year-round (no DST) — used only to pick a
+// sensible default meal type when the user doesn't say one, so a plain
+// "log it" doesn't force an extra round-trip asking which meal this was.
+function currentHourInMalawi() {
+  return (new Date().getUTCHours() + 2) % 24;
+}
+
+function inferMealTypeFromHour(hour) {
+  if (hour >= 5 && hour < 11) return "breakfast";
+  if (hour >= 11 && hour < 15) return "lunch";
+  if (hour >= 17 && hour < 21) return "dinner";
+  return "snack";
+}
+
+// POST /log — see sql/002_add_food_log_entries.sql in chakudya-api.
+// user_id is the WhatsApp number, matching the pattern last_food_context
+// already uses to key per-user state without a separate account system.
+async function logFoodEntry({ whatsappId, mealType, calories, foodName, env }) {
+  const res = await env.CHAKUDYA_API.fetch("https://chakudya-api/log", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      user_id: whatsappId,
+      meal_type: mealType,
+      calories,
+      food_name: foodName,
+    }),
+  });
+  if (!res.ok) return null;
+  const body = await res.json().catch(() => null);
+  return body?.data || null;
+}
+
+async function getLogSummary({ whatsappId, period, env }) {
+  const url = `https://chakudya-api/log/summary?user_id=${encodeURIComponent(whatsappId)}&period=${period}`;
+  const res = await env.CHAKUDYA_API.fetch(url);
+  if (!res.ok) return null;
+  const body = await res.json().catch(() => null);
+  return body?.data || null;
+}
+
+const MEAL_LABELS = { breakfast: "Breakfast", lunch: "Lunch", snack: "Snack", dinner: "Dinner" };
+
+function formatDailySummary(summary) {
+  const lines = [`*Today's log* — ${summary.date}`, `Total: ${Math.round(summary.total_calories)} kcal (${summary.entry_count} item${summary.entry_count === 1 ? "" : "s"})`];
+  for (const meal of LOG_MEAL_TYPES) {
+    const kcal = summary.by_meal?.[meal];
+    if (kcal) lines.push(`${MEAL_LABELS[meal]}: ${Math.round(kcal)} kcal`);
+  }
+  if (summary.entry_count === 0) lines.push("\nNothing logged yet today — say \"log it\" after I show you a food to start.");
+  return lines.join("\n");
+}
+
+function formatWeeklySummary(summary) {
+  const lines = [
+    `*This week's log* — ${summary.start_date} to ${summary.end_date}`,
+    `Total: ${Math.round(summary.total_calories)} kcal · Daily average: ${Math.round(summary.average_daily_calories)} kcal`,
+  ];
+  for (const day of summary.by_date || []) {
+    if (day.total_calories) lines.push(`${day.date}: ${Math.round(day.total_calories)} kcal`);
+  }
+  if (summary.entry_count === 0) lines.push("\nNothing logged yet this week — say \"log it\" after I show you a food to start.");
+  return lines.join("\n");
+}
+
 // Extracts the durable bits of a food record we need to re-scale it later
 // (name, its reference gram amount, and its macros AT that reference
 // amount) — this is what gets persisted as "last food discussed" via
@@ -452,6 +648,12 @@ function toFoodContext(item) {
   return {
     name,
     baseGrams,
+    // What amount was actually shown to the user for this context — starts
+    // equal to baseGrams (the default card), but the foodQty and
+    // servingOnly branches in handleTextMessage override this to the
+    // requested amount before saving, so "log it" always logs the SAME
+    // numbers the user just saw, not silently the base/default amount.
+    lastShownGrams: baseGrams,
     kcal: item.kcal ?? item.energy_kcal,
     protein: item.protein_g,
     carbs: item.carbs_g,
@@ -462,6 +664,15 @@ function toFoodContext(item) {
     calcium: item.calcium_mg,
     iron: item.iron_mg,
   };
+}
+
+// Scales just the kcal figure from a saved context to a target gram amount
+// — what logFoodEntry needs; the food diary only stores calories, not a
+// full macro/micro breakdown (see food_log_entries schema).
+function kcalAtGrams(context, grams) {
+  if (!context?.baseGrams || context.kcal == null) return null;
+  const factor = grams / context.baseGrams;
+  return Math.round(context.kcal * factor * 10) / 10;
 }
 
 // Scales a saved food context (see toFoodContext) to a target gram amount
@@ -1277,6 +1488,7 @@ const PROMPT_EXAMPLES_EN = [
   { id: "What should I feed my child if they are malnourished?", title: "Feeding a Thin Child" },
   { id: "Quinoa", title: "Look Up Any Food" },
   { id: "quinoa 200g", title: "Nutrition by Weight" },
+  { id: "today", title: "My Food Diary" },
 ];
 
 const PROMPT_EXAMPLES_NY = [
@@ -1286,6 +1498,7 @@ const PROMPT_EXAMPLES_NY = [
   { id: "What should I feed my child if they are malnourished?", title: "Kudyetsa Mwana" },
   { id: "Quinoa", title: "Funsani Chakudya" },
   { id: "quinoa 200g", title: "Kulemera kwa Chakudya" },
+  { id: "today", title: "Zakudya Zanu Lero" },
 ];
 
 async function sendPromptList(to, lang, env) {
