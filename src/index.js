@@ -22,6 +22,29 @@
  *      back via /log/summary. See detectLogCommand/detectLogSummaryCommand.
  *      No new D1 table needed — piggybacks on the existing
  *      last_food_context row already used for gram-based follow-ups.
+ *   8. Multi-ingredient meal logging: "log 2 eggs, 1 cup rice and chicken"
+ *      -> chakudya-api's /ingredients/parse (free text -> structured
+ *      ingredients) -> /meals/analyze (resolves + totals nutrients) -> one
+ *      /log entry for the whole meal. See detectMealLogCommand.
+ *   9. Nutrient comparison ("compare nsima, rice and potatoes") uses
+ *      chakudya-api's /foods/compare directly (2-6 foods, real per-100g
+ *      panel + highest/lowest flags + sourced glycaemic data where
+ *      available) instead of hand-built side-by-side cards. See
+ *      detectFoodComparison/compareFoodsViaChakudya.
+ *  10. Food substitutions ("substitute for nsima") -> /foods/substitutes.
+ *      See detectSubstituteRequest.
+ *  11. Drug-nutrient interactions ("interactions with warfarin", "foods to
+ *      avoid while taking metformin") -> /drug-interactions/search, a
+ *      structured clinical reference table rather than RAG's general
+ *      retrieval. See detectDrugInteractionQuery.
+ *  12. Nutrition label ("nutrition label for rice") -> /foods (to resolve
+ *      a local food id) then /foods/:id/label for a Codex-style label.
+ *      Only works for foods in the local Malawi FCT table (needs a numeric
+ *      id) — see detectLabelRequest/getFoodLabel.
+ *  13. Dietary Reference Intakes ("how much iron do I need", "RDA for
+ *      calcium for a pregnant woman") -> /dri, resolved from an
+ *      age/sex/life-stage guess extracted from the message. See
+ *      detectDriRequest/lookupDri.
  *
  * Required secrets (set with `wrangler secret put <NAME>` — never hardcode these):
  *   WHATSAPP_TOKEN         - Meta permanent/system-user access token
@@ -272,6 +295,42 @@ async function handleTextMessage(userText, from, env, ctx) {
     return;
   }
 
+  // Multi-ingredient meal logging ("log 2 eggs, 1 cup rice and chicken")
+  // — checked right after the single-food log command above since it's the
+  // same "log" intent, just with more than one item. detectLogCommand
+  // above only matches when nothing but grams/meal-type/filler words
+  // remain, so a real ingredient list always falls through to here instead.
+  const mealLogCmd = detectMealLogCommand(userText);
+  if (mealLogCmd) {
+    const analysis = await parseAndAnalyzeMeal(mealLogCmd.text, env);
+    if (analysis && (analysis.ingredients?.length || analysis.unresolved_ingredients?.length)) {
+      const mealType = mealLogCmd.mealType || inferMealTypeFromHour(currentHourInMalawi());
+      await sendWhatsAppReply(from, formatMealAnalysis(analysis, mealType), env);
+
+      const totalKcal = analysis.total_nutrients?.kcal ?? analysis.total_nutrients?.energy_kcal;
+      if (totalKcal != null && analysis.ingredients?.length) {
+        const logged = await logFoodEntry({
+          whatsappId: from,
+          mealType,
+          calories: Math.round(totalKcal),
+          foodName: summarizeMealName(analysis.ingredients),
+          env,
+        });
+        if (logged) {
+          await sendWhatsAppReply(
+            from,
+            `Logged as ${MEAL_LABELS[mealType]}: ${Math.round(totalKcal)} kcal total. ✅`,
+            env
+          );
+        }
+      }
+      return;
+    }
+    // Parsing/analysis failed entirely (e.g. Groq unavailable, nothing
+    // resolvable) — fall through to the normal flow below rather than
+    // leaving the user with no response at all.
+  }
+
   if (looksLikeBarcode(userText)) {
     const barcode = userText.trim();
     const found = await lookupBarcode(barcode, env);
@@ -284,15 +343,66 @@ async function handleTextMessage(userText, from, env, ctx) {
     // can still respond helpfully (e.g. "I couldn't find that product").
   }
 
-  // Two-food nutrient comparisons ("100g of X vs 100g of Y") get pulled
-  // straight from /foods/lookup's real per-100g food-database records
-  // (with USDA/OFF/FatSecret cascade), bypassing /rag/ask entirely — its
-  // retrieval sometimes mixes in exchange-list data (per-serving, e.g.
-  // "2 sardines"), which isn't comparable to a 100g figure. If either food
-  // isn't found this way, fall through to the normal RAG path below.
-  const twoFood = detectTwoFoodComparison(userText);
-  if (twoFood) {
-    const comparison = await compareTwoFoods(twoFood.foodA, twoFood.foodB, env);
+  // Food substitutions ("substitute for nsima", "what can I use instead of
+  // rice") — Chakudya's own substitution-group ranking (/foods/substitutes),
+  // not a guess from the LLM.
+  const substituteFor = detectSubstituteRequest(userText);
+  if (substituteFor) {
+    const data = await getFoodSubstitutes(substituteFor, env);
+    const formatted = formatSubstitutes(data);
+    if (formatted) {
+      await sendWhatsAppReply(from, formatted, env);
+      return;
+    }
+    // Not found at all (no matching food) — fall through to /rag/ask.
+  }
+
+  // Drug-nutrient interactions ("interactions with warfarin", "foods to
+  // avoid while taking metformin") — Chakudya's structured clinical
+  // reference table (/drug-interactions/search), not RAG's general
+  // retrieval, so severity/effects/implications come through verbatim.
+  const drugQuery = detectDrugInteractionQuery(userText);
+  if (drugQuery) {
+    const matches = await searchDrugInteractions(drugQuery, env);
+    if (matches) {
+      await sendWhatsAppReply(from, formatDrugInteractions(matches, drugQuery), env);
+      return;
+    }
+  }
+
+  // Nutrition label ("nutrition label for rice") — Codex-style label via
+  // /foods/:id/label. Only works for foods with a local Malawi FCT id, so a
+  // miss falls through to /rag/ask rather than dead-ending.
+  const labelFor = detectLabelRequest(userText);
+  if (labelFor) {
+    const labelResult = await getFoodLabel(labelFor, env);
+    if (labelResult) {
+      await sendWhatsAppReply(from, formatNutritionLabel(labelResult.label, labelResult.foodName), env);
+      return;
+    }
+  }
+
+  // Dietary Reference Intakes ("how much iron do I need", "RDA for calcium
+  // for a pregnant woman") — Chakudya's own NASEM/IOM DRI tables (/dri),
+  // resolved from whatever age/sex/life-stage hints are in the message.
+  const driReq = detectDriRequest(userText);
+  if (driReq) {
+    const data = await lookupDri(driReq, env);
+    const answer = formatDriAnswer(data, driReq);
+    if (answer) {
+      await sendWhatsAppReply(from, answer, env);
+      return;
+    }
+  }
+
+  // Nutrient comparisons ("compare nsima, rice and potatoes", "X vs Y") —
+  // resolved and computed entirely by Chakudya's /foods/compare (2-6 foods,
+  // real per-100g panel, highest/lowest flags, sourced glycaemic data where
+  // it exists) rather than hand-built side-by-side lookups here. If fewer
+  // than 2 of the named foods resolve, fall through to /rag/ask.
+  const foodsToCompare = detectFoodComparison(userText);
+  if (foodsToCompare) {
+    const comparison = await compareFoodsViaChakudya(foodsToCompare, env);
     if (comparison) {
       await sendWhatsAppReply(from, comparison, env);
       return;
@@ -363,23 +473,36 @@ async function handleTextMessage(userText, from, env, ctx) {
   await sendWhatsAppReply(from, answer, env);
 }
 
-// Detects phrasing like "100g of X ... compared with/to 100g of Y",
-// "compare X and Y", or "X vs Y" and extracts both food names.
-function detectTwoFoodComparison(query) {
-  const patterns = [
-    /\bof\s+([a-z0-9 ,()'-]+?)\s+compared\s+(?:with|to)\s+(?:\d+\s*g(?:rams)?\s+of\s+)?([a-z0-9 ,()'-]+?)[?.!]?$/i,
-    /\bcompare\b.*?\bof\s+([a-z0-9 ,()'-]+?)\s+(?:and|with|to|&|vs\.?|versus)\s+([a-z0-9 ,()'-]+?)[?.!]?$/i,
-    /\bcompare\b\s+([a-z0-9 ,()'-]+?)\s+(?:and|with|to|&|vs\.?|versus)\s+([a-z0-9 ,()'-]+?)[?.!]?$/i,
-    /^([a-z0-9 ,()'-]+?)\s+(?:vs\.?|versus)\s+([a-z0-9 ,()'-]+?)[?.!]?$/i,
-  ];
-  const stripTrailingVerb = (s) =>
-    s.replace(/\s+(provide|providing|have|has|contain|contains)$/i, "").trim();
-  for (const re of patterns) {
-    const m = query.match(re);
-    if (m && m[1] && m[2]) {
-      return { foodA: stripTrailingVerb(m[1].trim()), foodB: m[2].trim() };
-    }
+// Detects a comparison request naming 2-6 foods, in any of these shapes:
+//   "compare nsima, rice and potatoes"   (comma/and list after "compare")
+//   "100g of X compared with/to Y"
+//   "X vs Y" / "X versus Y"
+// Returns an array of 2-6 trimmed food-name strings, or null.
+function splitFoodList(text) {
+  return text
+    .split(/\s*,\s*|\s+and\s+|\s*&\s*/i)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+const stripTrailingVerb = (s) =>
+  s.replace(/\s+(provide|providing|have|has|contain|contains)$/i, "").trim();
+
+function detectFoodComparison(query) {
+  const listMatch = query.match(/\bcompare\b\s+([a-z0-9 ,()'&-]+?)[?.!]?$/i);
+  if (listMatch) {
+    const items = splitFoodList(listMatch[1]);
+    if (items.length >= 2) return items.slice(0, 6);
   }
+
+  const ofCompared = query.match(
+    /\bof\s+([a-z0-9 ,()'-]+?)\s+compared\s+(?:with|to)\s+(?:\d+\s*g(?:rams)?\s+of\s+)?([a-z0-9 ,()'-]+?)[?.!]?$/i
+  );
+  if (ofCompared) return [stripTrailingVerb(ofCompared[1].trim()), ofCompared[2].trim()];
+
+  const vsMatch = query.match(/^([a-z0-9 ,()'-]+?)\s+(?:vs\.?|versus)\s+([a-z0-9 ,()'-]+?)[?.!]?$/i);
+  if (vsMatch) return [vsMatch[1].trim(), vsMatch[2].trim()];
+
   return null;
 }
 
@@ -392,17 +515,71 @@ async function lookupFoodByName(name, env) {
   return Array.isArray(body?.data) ? body.data[0] : body?.data || null;
 }
 
-// Returns two formatted food cards side by side, or null (to fall back to
-// /rag/ask) if either food isn't found in the food database.
-async function compareTwoFoods(nameA, nameB, env) {
-  const [itemA, itemB] = await Promise.all([
-    lookupFoodByName(nameA, env),
-    lookupFoodByName(nameB, env),
-  ]);
-  const cardA = formatFoodResult(itemA);
-  const cardB = formatFoodResult(itemB);
-  if (!cardA || !cardB) return null;
-  return `${cardA}\n\n${cardB}`;
+// A handful of headline nutrients kept for the "highlights" section — the
+// full /foods/compare micronutrient panel is too long for a WhatsApp
+// message, so only these get a highest/lowest callout.
+const COMPARE_HIGHLIGHT_FIELDS = [
+  { field: "energy_kcal", label: "Energy" },
+  { field: "protein_g", label: "Protein" },
+  { field: "fiber_g", label: "Fiber" },
+  { field: "iron_mg", label: "Iron" },
+  { field: "calcium_mg", label: "Calcium" },
+  { field: "vitc_mg", label: "Vitamin C" },
+];
+
+// GET /foods/compare (2-6 foods) — Chakudya resolves each name (local FCT,
+// fuzzy match, then USDA/OFF/FatSecret cascade, same as /foods/lookup),
+// computes the full per-100g panel, and flags the highest/lowest food per
+// nutrient itself. Returns a formatted WhatsApp message, or null if fewer
+// than 2 of the named foods could be resolved (caller falls back to
+// /rag/ask in that case).
+async function compareFoodsViaChakudya(foodNames, env) {
+  const res = await env.CHAKUDYA_API.fetch(
+    `https://chakudya-api/foods/compare?foods=${encodeURIComponent(foodNames.join(","))}`
+  );
+  if (res.status === 400) return null; // fewer than 2 resolved — let rag/ask try
+  if (!res.ok) return null;
+
+  const body = await res.json().catch(() => null);
+  const data = body?.data;
+  if (!data?.foods?.length) return null;
+
+  const lines = [`*Comparing (per 100g):* ${data.foods.map((f) => f.food_name).join(", ")}`];
+
+  for (const food of data.foods) {
+    const p = food.per_100g || {};
+    const macros = [];
+    if (p.energy_kcal != null) macros.push(`${p.energy_kcal} kcal`);
+    if (p.protein_g != null) macros.push(`${p.protein_g}g protein`);
+    if (p.carbs_g != null) macros.push(`${p.carbs_g}g carbs`);
+    if (p.fat_g != null) macros.push(`${p.fat_g}g fat`);
+    lines.push(`\n*${food.food_name}* — ${macros.join(", ") || "no macro data"}`);
+    if (food.glycaemic?.entries?.length) {
+      const gi = food.glycaemic.entries[0];
+      if (gi.gi_value != null) lines.push(`GI: ${gi.gi_value} (${gi.source})`);
+    }
+  }
+
+  const highlights = COMPARE_HIGHLIGHT_FIELDS
+    .map(({ field, label }) => {
+      const nc = data.nutrient_comparison?.[field];
+      if (!nc || nc.highest == null) return null;
+      return nc.highest === nc.lowest
+        ? `${label}: about the same across all`
+        : `${label}: highest in ${nc.highest}, lowest in ${nc.lowest}`;
+    })
+    .filter(Boolean);
+
+  if (highlights.length) {
+    lines.push("\n🏆 *Highlights*");
+    lines.push(highlights.join("\n"));
+  }
+
+  if (data.unresolved?.length) {
+    lines.push(`\n⚠️ Couldn't find: ${data.unresolved.join(", ")}`);
+  }
+
+  return lines.join("\n");
 }
 
 // Common filler words that end up wrapped around the food name when the
@@ -625,6 +802,97 @@ function formatWeeklySummary(summary) {
   }
   if (summary.entry_count === 0) lines.push("\nNothing logged yet this week — say \"log it\" after I show you a food to start.");
   return lines.join("\n");
+}
+
+// --- Multi-ingredient meal logging (/ingredients/parse + /meals/analyze) ---
+//
+// "log 2 eggs, 1 cup rice and chicken" / "ate nsima, beans and greens for
+// dinner" — anything naming more than one food at once. detectLogCommand
+// above only matches a message that's PURELY grams/meal-type/filler words
+// after the verb, so a real ingredient list always falls through to this
+// detector instead. The comma/" and " check is what distinguishes this from
+// a single-food message ("log it as dinner" has neither).
+const MEAL_LOG_LEADING_VERB = /^(i ate|ate|log|save|record|add)\b\s*/i;
+
+function detectMealLogCommand(text) {
+  const t = text.trim();
+  if (!MEAL_LOG_LEADING_VERB.test(t)) return null;
+  if (!t.includes(",") && !/\band\b/i.test(t)) return null;
+
+  let rest = t.replace(MEAL_LOG_LEADING_VERB, "");
+  let mealType = null;
+
+  const trailingMeal = rest.match(/\bas\s+(breakfast|lunch|dinner|snack)\b\s*$/i);
+  if (trailingMeal) {
+    mealType = trailingMeal[1].toLowerCase();
+    rest = rest.slice(0, trailingMeal.index).trim();
+  } else {
+    const leadingMeal = rest.match(/\bfor\s+(breakfast|lunch|dinner|snack)[,:]?\s*/i);
+    if (leadingMeal) {
+      mealType = leadingMeal[1].toLowerCase();
+      rest = (rest.slice(0, leadingMeal.index) + rest.slice(leadingMeal.index + leadingMeal[0].length)).trim();
+    }
+  }
+
+  rest = rest.replace(/[?.!]+$/, "").trim();
+  if (!rest) return null;
+
+  return { text: rest, mealType };
+}
+
+// Chains /ingredients/parse (free text -> structured ingredients) straight
+// into /meals/analyze (resolves each ingredient against local/external food
+// data and totals the nutrients) — Chakudya does all the resolution and
+// arithmetic; this just passes its own output from one endpoint to the
+// next. Returns the /meals/analyze data object, or null on any failure.
+async function parseAndAnalyzeMeal(text, env) {
+  const parseRes = await env.CHAKUDYA_API.fetch("https://chakudya-api/ingredients/parse", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+  if (!parseRes.ok) return null;
+  const parseBody = await parseRes.json().catch(() => null);
+  const ingredients = parseBody?.data?.ingredients;
+  if (!Array.isArray(ingredients) || !ingredients.length) return null;
+
+  const analyzeRes = await env.CHAKUDYA_API.fetch("https://chakudya-api/meals/analyze", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ingredients }),
+  });
+  if (!analyzeRes.ok) return null;
+  const analyzeBody = await analyzeRes.json().catch(() => null);
+  return analyzeBody?.data || null;
+}
+
+function formatMealAnalysis(analysis, mealType) {
+  const t = analysis.total_nutrients || {};
+  const kcal = t.kcal ?? t.energy_kcal;
+
+  const lines = [`*Meal analysis* (${MEAL_LABELS[mealType] || mealType})`];
+  const macros = [];
+  if (kcal != null) macros.push(`${Math.round(kcal)} kcal`);
+  if (t.protein_g != null) macros.push(`${t.protein_g}g protein`);
+  if (t.carbs_g != null) macros.push(`${t.carbs_g}g carbs`);
+  if (t.fat_g != null) macros.push(`${t.fat_g}g fat`);
+  if (macros.length) lines.push(macros.join(", "));
+
+  if (analysis.ingredients?.length) {
+    lines.push("");
+    lines.push("Items: " + analysis.ingredients.map((i) => `${i.food_name} (${i.grams}g)`).join(", "));
+  }
+  if (analysis.unresolved_ingredients?.length) {
+    const names = analysis.unresolved_ingredients.map((u) => u.input?.food_name || String(u.input));
+    lines.push(`⚠️ Couldn't match: ${names.join(", ")}`);
+  }
+  return lines.join("\n");
+}
+
+function summarizeMealName(ingredients) {
+  if (!ingredients?.length) return "Mixed meal";
+  const names = ingredients.slice(0, 4).map((i) => i.food_name);
+  return names.join(", ") + (ingredients.length > 4 ? ", +more" : "");
 }
 
 // Extracts the durable bits of a food record we need to re-scale it later
@@ -1200,6 +1468,275 @@ function formatFoodResult(item) {
   return lines.join("\n");
 }
 
+// --- Food substitutions (/foods/substitutes) ---
+//
+// "substitute for nsima" / "what can I use instead of rice" — Chakudya
+// resolves the food, classifies it into a substitution group, and ranks
+// candidates by nutritional closeness itself (see chakudya-api's
+// handleFoodSubstitutes). This just formats the result.
+function detectSubstituteRequest(text) {
+  const t = text.trim();
+  let m = t.match(/\b(?:substitutes?|alternatives?|replacements?)\s+(?:for|to)\s+([a-z0-9 '()-]+?)[?.!]?$/i);
+  if (m) return m[1].trim();
+  m = t.match(/\bwhat can i (?:use|eat|have)\s+instead of\s+([a-z0-9 '()-]+?)[?.!]?$/i);
+  if (m) return m[1].trim();
+  m = t.match(/^instead of\s+([a-z0-9 '()-]+?),?\s+what can i (?:use|eat|have)\b/i);
+  if (m) return m[1].trim();
+  return null;
+}
+
+async function getFoodSubstitutes(foodName, env) {
+  const res = await env.CHAKUDYA_API.fetch(
+    `https://chakudya-api/foods/substitutes?food_name=${encodeURIComponent(foodName)}`
+  );
+  if (res.status === 404) return null; // food itself wasn't found — fall back to rag/ask
+  if (!res.ok) return null;
+  const body = await res.json().catch(() => null);
+  return body?.data || null;
+}
+
+function formatSubstitutes(data) {
+  if (!data) return null;
+  if (!data.substitution_group) {
+    return `Couldn't find a known substitution group for *${data.original?.food_name}*. Try asking about a common Malawian staple, protein source, or vegetable instead.`;
+  }
+
+  const lines = [`*Substitutes for ${data.original.food_name}* (${data.substitution_group})`];
+  for (const s of data.substitutes || []) {
+    const p = s.per_100g || {};
+    lines.push(`• ${s.food_name} — ${p.kcal ?? "?"} kcal, ${p.protein_g ?? "?"}g protein per 100g`);
+  }
+  if (!data.substitutes?.length) lines.push("No close nutritional matches found in the local database.");
+  if (data.note) lines.push(`\n_${data.note}_`);
+  return lines.join("\n");
+}
+
+// --- Drug-nutrient interactions (/drug-interactions/search) ---
+//
+// "interactions with warfarin" / "foods to avoid while taking metformin" —
+// Chakudya's own migrated clinical reference table (drug, category,
+// severity, effects, implications), not a general RAG answer. Structured
+// fields come through verbatim so the severity/guidance isn't paraphrased.
+function detectDrugInteractionQuery(text) {
+  const t = text.trim();
+  let m = t.match(/\b(?:drug[- ]?nutrient )?interactions?\s+(?:with|for|of)\s+([a-z0-9 '()-]+?)[?.!]?$/i);
+  if (m) return m[1].trim();
+  m = t.match(/\bfoods?\s+to\s+avoid\s+(?:while|when)?\s*(?:taking|on)\s+([a-z0-9 '()-]+?)[?.!]?$/i);
+  if (m) return m[1].trim();
+  m = t.match(/\bwhat (?:foods|nutrients)\s+(?:should i avoid|interact)\s+with\s+([a-z0-9 '()-]+?)[?.!]?$/i);
+  if (m) return m[1].trim();
+  return null;
+}
+
+async function searchDrugInteractions(query, env) {
+  const res = await env.CHAKUDYA_API.fetch(
+    `https://chakudya-api/drug-interactions/search?q=${encodeURIComponent(query)}`
+  );
+  if (!res.ok) return null;
+  const body = await res.json().catch(() => null);
+  return Array.isArray(body?.data) ? body.data : null;
+}
+
+function formatDrugInteractions(matches, query) {
+  if (!matches.length) {
+    return `No drug-nutrient interaction entry found for "${query}" in the clinical database. This doesn't confirm there's no interaction — always check with a pharmacist or clinician. 🙏`;
+  }
+
+  const lines = [`*Drug-nutrient interactions: ${query}*`];
+  for (const m of matches.slice(0, 3)) {
+    lines.push(`\n*${m.drug}*${m.severity ? ` — ${m.severity}` : ""}`);
+    if (m.effects?.length) lines.push(`Effects: ${m.effects.slice(0, 3).join("; ")}`);
+    if (m.implications?.length) lines.push(`Guidance: ${m.implications.slice(0, 3).join("; ")}`);
+  }
+  if (matches.length > 3) lines.push(`\n(+${matches.length - 3} more matches — ask more specifically to narrow it down)`);
+  lines.push("\n_Clinical reference only — confirm with a pharmacist or clinician before changing medication or diet._");
+  return lines.join("\n");
+}
+
+// --- Nutrition label (/foods + /foods/:id/label) ---
+//
+// "nutrition label for rice" — /foods/:id/label needs a numeric local-`foods`
+// id, so this first resolves the name via a plain /foods search (not the
+// external-cascade /foods/lookup, since /foods/:id/label only works on
+// rows actually in the local `foods` table) then requests the label.
+function detectLabelRequest(text) {
+  const t = text.trim();
+  let m = t.match(/\b(?:nutrition(?:al)? (?:facts )?label|food label)\s+(?:for|of)\s+([a-z0-9 '()-]+?)[?.!]?$/i);
+  if (m) return m[1].trim();
+  m = t.match(/\bshow (?:me )?(?:the )?label for\s+([a-z0-9 '()-]+?)[?.!]?$/i);
+  if (m) return m[1].trim();
+  return null;
+}
+
+async function getFoodLabel(foodName, env) {
+  const searchRes = await env.CHAKUDYA_API.fetch(
+    `https://chakudya-api/foods?search=${encodeURIComponent(foodName)}&limit=1`
+  );
+  if (!searchRes.ok) return null;
+  const searchBody = await searchRes.json().catch(() => null);
+  const match = Array.isArray(searchBody?.data) ? searchBody.data[0] : null;
+  if (!match?.id) return null; // not in the local FCT table — labels aren't available for it
+
+  const labelRes = await env.CHAKUDYA_API.fetch(`https://chakudya-api/foods/${match.id}/label`);
+  if (!labelRes.ok) return null;
+  const labelBody = await labelRes.json().catch(() => null);
+  if (!labelBody?.data) return null;
+  return { label: labelBody.data, foodName: labelBody.food_name || match.food_name };
+}
+
+function formatNutritionLabel(label, foodName) {
+  if (!label) return null;
+  const lines = [
+    `*Nutrition Label — ${foodName}*`,
+    `Serving: ${label.serving_size} (${label.serving_grams}g)`,
+  ];
+  if (label.calories != null) lines.push(`Calories: ${label.calories} kcal`);
+  if (label.total_fat_g != null) lines.push(`Total Fat: ${label.total_fat_g}g`);
+  if (label.saturated_fat_g != null) lines.push(`  Saturated Fat: ${label.saturated_fat_g}g`);
+  if (label.carbohydrates_g != null) lines.push(`Carbohydrates: ${label.carbohydrates_g}g`);
+  if (label.fiber_g != null) lines.push(`  Fiber: ${label.fiber_g}g`);
+  if (label.sugars_g != null) lines.push(`  Sugars: ${label.sugars_g}g`);
+  if (label.protein_g != null) lines.push(`Protein: ${label.protein_g}g`);
+  if (label.sodium_mg != null) lines.push(`Sodium: ${label.sodium_mg}mg`);
+
+  const vm = Object.entries(label.vitamins_minerals || {});
+  if (vm.length) {
+    lines.push("");
+    lines.push("Vitamins & Minerals:");
+    for (const [name, val] of vm) lines.push(`  ${name}: ${val}`);
+  }
+  if (label.missing_fields?.length) {
+    lines.push(`\n_Not on file for this food: ${label.missing_fields.join(", ")}._`);
+  }
+  return lines.join("\n");
+}
+
+// --- Dietary Reference Intakes (/dri) ---
+//
+// "how much iron do I need" / "RDA for calcium for a pregnant woman" —
+// Chakudya's own NASEM/IOM DRI tables, resolved from an age/sex/life-stage
+// guess extracted from the message text (see detectDriRequest). When no
+// age is stated, a representative default is used and flagged in the
+// reply rather than silently presented as exact.
+const DRI_NUTRIENT_KEYWORDS = {
+  iron: "iron_mg",
+  calcium: "calcium_mg",
+  zinc: "zinc_mg",
+  magnesium: "magnesium_mg",
+  potassium: "potassium_mg",
+  sodium: "sodium_mg",
+  iodine: "iodine_mcg",
+  protein: "protein_g",
+  fiber: "fiber_g",
+  fibre: "fiber_g",
+  folate: "folate_mcg",
+  "folic acid": "folate_mcg",
+  "vitamin a": "vita_rae_mcg",
+  "vit a": "vita_rae_mcg",
+  "vitamin c": "vitc_mg",
+  "vit c": "vitc_mg",
+  "vitamin d": "vitd_mcg",
+  "vit d": "vitd_mcg",
+  "vitamin b12": "vitb12_mcg",
+  "vitamin b-12": "vitb12_mcg",
+  "vit b12": "vitb12_mcg",
+  carbohydrate: "carbs_g",
+  carbohydrates: "carbs_g",
+  carbs: "carbs_g",
+};
+// Longest phrase first so "vitamin b12" is tried before any shorter
+// substring of it could accidentally match instead.
+const DRI_NUTRIENT_PHRASES = Object.keys(DRI_NUTRIENT_KEYWORDS).sort((a, b) => b.length - a.length);
+
+function matchDriNutrient(phrase) {
+  const p = phrase.toLowerCase().trim();
+  for (const key of DRI_NUTRIENT_PHRASES) {
+    if (p.includes(key)) return DRI_NUTRIENT_KEYWORDS[key];
+  }
+  return null;
+}
+
+function detectDriRequest(text) {
+  const t = text.trim();
+
+  let nutrientPhrase = null;
+  let m = t.match(/\bhow much\s+([a-z0-9 -]+?)\s+do(?:es)?\s+(?:i|a|an|my|the)\b.*\bneed\b/i);
+  if (m) nutrientPhrase = m[1];
+  if (!nutrientPhrase) {
+    m = t.match(
+      /\b(?:rda|recommended (?:daily )?(?:allowance|intake)|dri|daily (?:requirement|need)s?|adequate intake)\s+(?:for|of)\s+([a-z0-9 -]+?)[?.!]?$/i
+    );
+    if (m) nutrientPhrase = m[1];
+  }
+  if (!nutrientPhrase) return null;
+
+  const nutrientKey = matchDriNutrient(nutrientPhrase);
+  if (!nutrientKey) return null;
+
+  let sex = null;
+  if (/\b(woman|women|female|girl)\b/i.test(t)) sex = "female";
+  if (/\b(man|men|male|boy)\b/i.test(t)) sex = "male";
+
+  let lifeStageType = "normal";
+  if (/\b(pregnant|pregnancy)\b/i.test(t)) {
+    lifeStageType = "pregnancy";
+    sex = "female";
+  } else if (/\b(lactating|breastfeeding|breast-feeding|nursing)\b/i.test(t)) {
+    lifeStageType = "lactation";
+    sex = "female";
+  }
+
+  let age = null;
+  let assumedAge = false;
+  const ageMatch = t.match(/\b(\d{1,3})\s*[- ]?\s*(?:years?|yrs?|yo)\b/i);
+  if (ageMatch) {
+    age = Number(ageMatch[1]);
+  } else if (lifeStageType !== "normal") {
+    age = 25; // representative reproductive-age default for pregnancy/lactation
+    assumedAge = true;
+  } else if (/\b(child|infant|baby|toddler)\b/i.test(t)) {
+    return null; // too many life-stage tiers to guess safely without an age
+  } else if (sex) {
+    age = 30; // representative adult default when only sex is given
+    assumedAge = true;
+  } else {
+    return null; // not enough info to resolve a life stage safely
+  }
+
+  return { nutrientKey, age, sex, lifeStageType, assumedAge };
+}
+
+async function lookupDri({ nutrientKey, age, sex, lifeStageType }, env) {
+  const params = new URLSearchParams();
+  params.set("nutrient", nutrientKey);
+  params.set("age", String(age));
+  if (sex) params.set("sex", sex);
+  if (lifeStageType) params.set("life_stage_type", lifeStageType);
+
+  const res = await env.CHAKUDYA_API.fetch(`https://chakudya-api/dri?${params.toString()}`);
+  if (!res.ok) return null;
+  const body = await res.json().catch(() => null);
+  return body?.data || null;
+}
+
+function formatDriAnswer(data, driReq) {
+  if (!data?.nutrient) return null;
+  const n = data.nutrient;
+
+  const lines = [`*${n.label} — Recommended Intake*`, `Life stage: ${data.life_stage_label}`];
+  if (n.rda != null) lines.push(`RDA: ${n.rda} ${n.unit}`);
+  else if (n.ai != null) lines.push(`Adequate Intake (AI): ${n.ai} ${n.unit}`);
+  else lines.push("No RDA/AI established for this nutrient at this life stage.");
+  if (n.ul != null) {
+    lines.push(`Upper Limit (UL): ${n.ul} ${n.unit} — avoid exceeding this from food + supplements combined.`);
+  }
+  if (driReq?.assumedAge) {
+    lines.push(`\n_Assumed age ~${driReq.age} since none was given — mention your exact age for a more precise figure._`);
+  }
+  lines.push("\n_Source: US Food & Nutrition Board (NASEM/IOM) Dietary Reference Intakes, via the Chakudya Nutrition Registry._");
+  return lines.join("\n");
+}
+
 // We don't control Chakudya's internal prompt/retrieval logic (separate
 // repo), but the query text itself IS fed to its LLM — so for
 // multi-topic questions (comparisons, or "X and Y" combos like a patient
@@ -1483,9 +2020,11 @@ async function sendWhatsAppReply(to, text, env) {
 // stays short to fit WhatsApp's 24-char row title limit.
 const PROMPT_EXAMPLES_EN = [
   { id: "What foods are high in iron?", title: "Iron-Rich Foods" },
-  { id: "Compare nsima and rice", title: "Nsima vs Rice" },
+  { id: "Compare nsima, rice and potatoes", title: "Compare Foods" },
+  { id: "Substitute for nsima", title: "Food Substitutes" },
   { id: "Exchange list for a diabetic patient", title: "Diabetes Food Swaps" },
-  { id: "What should I feed my child if they are malnourished?", title: "Feeding a Thin Child" },
+  { id: "Interactions with warfarin", title: "Drug-Food Interactions" },
+  { id: "How much iron do I need?", title: "Daily Nutrient Needs" },
   { id: "Quinoa", title: "Look Up Any Food" },
   { id: "quinoa 200g", title: "Nutrition by Weight" },
   { id: "today", title: "My Food Diary" },
@@ -1493,9 +2032,10 @@ const PROMPT_EXAMPLES_EN = [
 
 const PROMPT_EXAMPLES_NY = [
   { id: "Ndi zakudya ziti zomwe zili ndi iron wambiri?", title: "Zakudya za Iron" },
-  { id: "Compare nsima and rice", title: "Nsima kapena Mpunga" },
+  { id: "Compare nsima, rice and potatoes", title: "Yerekezerani Zakudya" },
+  { id: "Substitute for nsima", title: "Zam'malo mwa Nsima" },
   { id: "Exchange list for a diabetic patient", title: "Kudya kwa Shuga" },
-  { id: "What should I feed my child if they are malnourished?", title: "Kudyetsa Mwana" },
+  { id: "How much iron do I need?", title: "Iron Yofunika Tsiku" },
   { id: "Quinoa", title: "Funsani Chakudya" },
   { id: "quinoa 200g", title: "Kulemera kwa Chakudya" },
   { id: "today", title: "Zakudya Zanu Lero" },
