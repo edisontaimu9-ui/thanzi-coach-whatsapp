@@ -31,20 +31,8 @@ jobs:
           accountId: 2d878c3281833694bc40ceecd6cf889f
           command: deploy
 
-      - name: Push secrets (WHATSAPP_TOKEN, VERIFY_TOKEN, GROQ_API_KEY, STATS_TOKEN, ADMIN_PHONE)
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: 2d878c3281833694bc40ceecd6cf889f
-          secrets: |
-            WHATSAPP_TOKEN
-            VERIFY_TOKEN
-            GROQ_API_KEY
-            STATS_TOKEN
-            ADMIN_PHONE
-        env:
-          WHATSAPP_TOKEN: ${{ secrets.WHATSAPP_TOKEN }}
-          VERIFY_TOKEN: ${{ secrets.VERIFY_TOKEN }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          STATS_TOKEN: ${{ secrets.STATS_TOKEN }}
-          ADMIN_PHONE: ${{ secrets.ADMIN_PHONE }}
+# Secrets (WHATSAPP_TOKEN, VERIFY_TOKEN, GROQ_API_KEY, STATS_TOKEN, ADMIN_PHONE)
+# are no longer auto-pushed here — that step was failing on every push with no
+# visible reason. Set/update them directly in the Cloudflare dashboard instead:
+# Workers & Pages > thanzi-coach-whatsapp > Settings > Variables and Secrets.
+# They only need touching when a value actually changes, not on every deploy.
