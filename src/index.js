@@ -48,12 +48,14 @@
  *  14. Plain multi-food descriptions with no "compare"/"vs" wording
  *      ("Orange fleshed sweet potato and parboiled Usipa porridge") ->
  *      resolved via chakudya-api's POST /batch (one /foods/lookup per named
- *      food, single call/invocation) instead of /rag/ask. Avoids /rag/ask's
- *      internal multi-topic fan-out hitting Cloudflare's per-invocation
- *      subrequest ceiling on compound queries (previously surfaced to the
- *      user as SUBREQUEST_LIMIT_MESSAGE, "couldn't complete your request").
- *      Falls back to /rag/ask if nothing resolves. See
- *      detectMultiFoodList/lookupFoodsViaBatch/formatMultiFoodResults.
+ *      food, single call/invocation) instead of one combined /rag/ask.
+ *      Avoids /rag/ask's internal multi-topic fan-out hitting Cloudflare's
+ *      per-invocation subrequest ceiling on compound queries (previously
+ *      surfaced to the user as SUBREQUEST_LIMIT_MESSAGE, "couldn't complete
+ *      your request"). Any name the batch can't find gets its own
+ *      individual /rag/ask call (still single-topic, still safe) instead of
+ *      being dropped. See detectMultiFoodList/lookupFoodsViaBatch/
+ *      resolveUnknownFoodsViaRag/formatMultiFoodResults.
  *
  * Required secrets (set with `wrangler secret put <NAME>` — never hardcode these):
  *   WHATSAPP_TOKEN         - Meta permanent/system-user access token
@@ -420,23 +422,32 @@ async function handleTextMessage(userText, from, env, ctx) {
 
   // Plain multi-food descriptions with no "compare"/"vs" wording and no "?"
   // ("Orange fleshed sweet potato and parboiled Usipa porridge") still name
-  // 2+ separate foods. Routing these through /rag/ask makes Chakudya's own
-  // retrieval fan out per food term (semantic search + Malawi FCT +
-  // packaged/OCR + exchange/renal/formula + barcode + USDA/OFF/FatSecret
-  // cascade — EACH), which can blow Cloudflare's per-invocation subrequest
-  // ceiling even at top_k:12 and leaks as SUBREQUEST_LIMIT_MESSAGE (the
-  // generic "couldn't complete your request" reply) instead of an answer.
-  // Resolve each named food directly via /foods/lookup instead — no LLM, a
-  // fraction of the subrequest cost per item — sent together as one
-  // Chakudya /batch call so it's still a single round trip. Falls back to
-  // /rag/ask (below) if nothing resolves, so a genuine question that
-  // happens to contain "and" (e.g. "iron and folate for pregnancy") just
-  // finds no food matches here and continues on to the normal flow.
+  // 2+ separate foods. Routing these through /rag/ask as ONE combined query
+  // makes Chakudya's own retrieval fan out per food term (semantic search +
+  // Malawi FCT + packaged/OCR + exchange/renal/formula + barcode +
+  // USDA/OFF/FatSecret cascade — EACH) all within a single invocation,
+  // which can blow Cloudflare's per-invocation subrequest ceiling even at
+  // top_k:12 and leaks as SUBREQUEST_LIMIT_MESSAGE (the generic "couldn't
+  // complete your request" reply) instead of an answer. Resolve each named
+  // food directly via /foods/lookup instead — no LLM, a fraction of the
+  // subrequest cost per item — sent together as one Chakudya /batch call so
+  // it's still a single round trip. Anything the batch can't find (not in
+  // the local FCT) gets its own individual /rag/ask call instead of being
+  // dropped — still single-topic per call, so still safe. Only falls back
+  // to the normal flow (below) if NEITHER approach resolves anything, so a
+  // genuine question that happens to contain "and" (e.g. "iron and folate
+  // for pregnancy") just finds no food matches here and continues on.
   if (!foodsToCompare) {
     const foodList = detectMultiFoodList(userText);
     if (foodList) {
       const results = await lookupFoodsViaBatch(foodList, env);
-      const formatted = formatMultiFoodResults(results);
+      const unresolvedNames = results
+        ? results.filter((r) => !r.item).map((r) => r.name)
+        : foodList; // batch call itself failed — try every name individually
+      const ragAnswers = unresolvedNames.length
+        ? await resolveUnknownFoodsViaRag(unresolvedNames, from, env)
+        : [];
+      const formatted = formatMultiFoodResults(results, ragAnswers);
       if (formatted) {
         await sendWhatsAppReply(from, formatted, env);
         return;
@@ -667,25 +678,60 @@ async function lookupFoodsViaBatch(foodNames, env) {
   });
 }
 
-// Formats the batch results from lookupFoodsViaBatch into one WhatsApp
-// message (each resolved food as its own formatFoodResult card, unresolved
-// names called out at the end). Returns null if nothing resolved at all —
-// caller falls back to /rag/ask in that case, same as compareFoodsViaChakudya.
-function formatMultiFoodResults(results) {
-  if (!results?.length) return null;
+// For food names the batch lookup couldn't resolve (not in the local FCT —
+// e.g. "parboiled Usipa porridge"), ask Chakudya about each one
+// individually via /rag/ask instead of giving up. Critically, each call is
+// its own Worker invocation with its own subrequest budget — this is what
+// keeps it safe where a single combined "A and B and C" /rag/ask call
+// isn't: that one call's internal fan-out (KB + Malawi FCT + packaged/OCR +
+// exchange lists + barcode + USDA/OFF/FatSecret cascade) happens per food
+// term but all within the SAME invocation, so it can blow the
+// per-invocation subrequest ceiling once you combine enough foods. Asking
+// one food per call keeps every call single-topic and within budget. Runs
+// in parallel; one name failing doesn't affect the others.
+async function resolveUnknownFoodsViaRag(names, fromNumber, env) {
+  const settled = await Promise.all(
+    names.map(async (name) => {
+      try {
+        const answer = await askChakudya(name, fromNumber, env);
+        return { name, answer };
+      } catch (err) {
+        console.error("resolveUnknownFoodsViaRag failed for", name, err);
+        return { name, answer: null };
+      }
+    })
+  );
+  return settled.filter((r) => r.answer);
+}
 
-  const cards = [];
+// Formats the combined results: batch-resolved foods as formatFoodResult
+// cards, individually-resolved-via-rag foods as their own labeled section,
+// and any name neither approach could resolve called out at the end.
+// Returns null only if literally nothing resolved either way — caller
+// falls back to the normal flow in that case.
+function formatMultiFoodResults(results, ragAnswers) {
+  if (!results?.length && !ragAnswers?.length) return null;
+
+  const sections = [];
   const unresolved = [];
-  for (const { name, item } of results) {
+  for (const { name, item } of results || []) {
     const card = formatFoodResult(item);
-    if (card) cards.push(card);
+    if (card) sections.push(card);
     else unresolved.push(name);
   }
-  if (!cards.length) return null;
 
-  const lines = [cards.join("\n\n")];
-  if (unresolved.length) {
-    lines.push(`\n⚠️ Couldn't find: ${unresolved.join(", ")}`);
+  const resolvedByRag = new Set();
+  for (const { name, answer } of ragAnswers || []) {
+    sections.push(`*${name}*\n${answer}`);
+    resolvedByRag.add(name);
+  }
+
+  const stillUnresolved = unresolved.filter((name) => !resolvedByRag.has(name));
+  if (!sections.length) return null;
+
+  const lines = [sections.join("\n\n")];
+  if (stillUnresolved.length) {
+    lines.push(`\n⚠️ Couldn't find: ${stillUnresolved.join(", ")}`);
   }
   return lines.join("\n");
 }
