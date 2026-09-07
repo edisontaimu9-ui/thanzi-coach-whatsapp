@@ -45,6 +45,18 @@
  *      calcium for a pregnant woman") -> /dri, resolved from an
  *      age/sex/life-stage guess extracted from the message. See
  *      detectDriRequest/lookupDri.
+<<<<<<< HEAD
+=======
+ *  14. Plain multi-food descriptions with no "compare"/"vs" wording
+ *      ("Orange fleshed sweet potato and parboiled Usipa porridge") ->
+ *      resolved via chakudya-api's POST /batch (one /foods/lookup per named
+ *      food, single call/invocation) instead of /rag/ask. Avoids /rag/ask's
+ *      internal multi-topic fan-out hitting Cloudflare's per-invocation
+ *      subrequest ceiling on compound queries (previously surfaced to the
+ *      user as SUBREQUEST_LIMIT_MESSAGE, "couldn't complete your request").
+ *      Falls back to /rag/ask if nothing resolves. See
+ *      detectMultiFoodList/lookupFoodsViaBatch/formatMultiFoodResults.
+>>>>>>> 0b20793 (Route plain multi-food descriptions through /batch instead of /rag/ask (fixes subrequest-limit errors))
  *
  * Required secrets (set with `wrangler secret put <NAME>` — never hardcode these):
  *   WHATSAPP_TOKEN         - Meta permanent/system-user access token
@@ -409,6 +421,32 @@ async function handleTextMessage(userText, from, env, ctx) {
     }
   }
 
+  // Plain multi-food descriptions with no "compare"/"vs" wording and no "?"
+  // ("Orange fleshed sweet potato and parboiled Usipa porridge") still name
+  // 2+ separate foods. Routing these through /rag/ask makes Chakudya's own
+  // retrieval fan out per food term (semantic search + Malawi FCT +
+  // packaged/OCR + exchange/renal/formula + barcode + USDA/OFF/FatSecret
+  // cascade — EACH), which can blow Cloudflare's per-invocation subrequest
+  // ceiling even at top_k:12 and leaks as SUBREQUEST_LIMIT_MESSAGE (the
+  // generic "couldn't complete your request" reply) instead of an answer.
+  // Resolve each named food directly via /foods/lookup instead — no LLM, a
+  // fraction of the subrequest cost per item — sent together as one
+  // Chakudya /batch call so it's still a single round trip. Falls back to
+  // /rag/ask (below) if nothing resolves, so a genuine question that
+  // happens to contain "and" (e.g. "iron and folate for pregnancy") just
+  // finds no food matches here and continues on to the normal flow.
+  if (!foodsToCompare) {
+    const foodList = detectMultiFoodList(userText);
+    if (foodList) {
+      const results = await lookupFoodsViaBatch(foodList, env);
+      const formatted = formatMultiFoodResults(results);
+      if (formatted) {
+        await sendWhatsAppReply(from, formatted, env);
+        return;
+      }
+    }
+  }
+
   // "quinoa 200g" / "200g of rice" — a specific-weight nutrition request is
   // arithmetic (scale the per-100g figures), not something an LLM should be
   // asked to compute. Doing it as real math here is both more reliable and
@@ -580,6 +618,82 @@ async function compareFoodsViaChakudya(foodNames, env) {
   }
 
   return lines.join("\n");
+<<<<<<< HEAD
+=======
+}
+
+// Plain "X and Y[, and Z]" food descriptions (no "compare"/"vs" wording, no
+// "?") — reuses splitFoodList (comma/and/&) but, unlike detectFoodComparison,
+// doesn't require an explicit comparison verb. Deliberately conservative:
+// bails on anything that reads like a real question (has "?", or starts
+// with a question/imperative word — same list looksLikeBareFoodName uses)
+// and on any split item longer than 6 words, so an ordinary sentence that
+// happens to contain "and" doesn't get misread as a food list.
+function detectMultiFoodList(text) {
+  const t = text.trim();
+  if (!t || t.includes("?")) return null;
+  if (BARE_QUERY_LEADING_WORDS.test(t)) return null;
+  const items = splitFoodList(t);
+  if (items.length < 2 || items.length > 6) return null;
+  if (items.some((item) => !item || item.split(/\s+/).length > 6)) return null;
+  return items;
+}
+
+// One /foods/lookup per named food, sent together as a single POST /batch
+// call (see chakudya-api's /batch) instead of N separate service-binding
+// calls — same round-trip either way (service bindings are in-process), but
+// bundling keeps this to one call site rather than a Promise.all of raw
+// lookupFoodByName() calls, and gives us per-item status/failure handling
+// for free via the batch envelope. Returns null on a hard failure (bad
+// response, batch malformed) so the caller falls back to /rag/ask; a
+// per-item miss just comes back with item: null in that slot instead of
+// failing the whole batch.
+async function lookupFoodsViaBatch(foodNames, env) {
+  const res = await env.CHAKUDYA_API.fetch("https://chakudya-api/batch", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      requests: foodNames.map((name, i) => ({
+        id: String(i),
+        method: "GET",
+        path: `/foods/lookup?q=${encodeURIComponent(name)}`,
+      })),
+    }),
+  });
+  if (!res.ok) return null;
+
+  const body = await res.json().catch(() => null);
+  if (!Array.isArray(body?.data)) return null;
+
+  return foodNames.map((name, i) => {
+    const entry = body.data.find((r) => r.id === String(i));
+    const item = entry?.status === 200 ? entry.body?.data : null;
+    return { name, item: Array.isArray(item) ? item[0] : item };
+  });
+}
+
+// Formats the batch results from lookupFoodsViaBatch into one WhatsApp
+// message (each resolved food as its own formatFoodResult card, unresolved
+// names called out at the end). Returns null if nothing resolved at all —
+// caller falls back to /rag/ask in that case, same as compareFoodsViaChakudya.
+function formatMultiFoodResults(results) {
+  if (!results?.length) return null;
+
+  const cards = [];
+  const unresolved = [];
+  for (const { name, item } of results) {
+    const card = formatFoodResult(item);
+    if (card) cards.push(card);
+    else unresolved.push(name);
+  }
+  if (!cards.length) return null;
+
+  const lines = [cards.join("\n\n")];
+  if (unresolved.length) {
+    lines.push(`\n⚠️ Couldn't find: ${unresolved.join(", ")}`);
+  }
+  return lines.join("\n");
+>>>>>>> 0b20793 (Route plain multi-food descriptions through /batch instead of /rag/ask (fixes subrequest-limit errors))
 }
 
 // Common filler words that end up wrapped around the food name when the
