@@ -540,14 +540,33 @@ async function handleTextMessage(userText, from, env, ctx) {
   // knowledge-base indexing we can't patch from here (separate repo).
   // /foods/lookup reliably includes a real measure, so route bare names
   // there directly and only fall back to /rag/ask if nothing is found.
+  //
+  // /foods/lookup's `q=` search already returns its candidates ranked
+  // best-first (local FCT match, then fuzzy match, then the USDA/OFF/
+  // FatSecret cascade) — but the top hit isn't always what the person
+  // meant, especially for a misspelling or a partial/generic name. Rather
+  // than silently showing (or silently discarding) a possibly-wrong guess,
+  // only auto-show the top result when it's a direct/exact name match;
+  // otherwise offer up to the top 3 candidates as a tappable list so the
+  // person can pick the one they actually meant (see sendFoodOptionsList —
+  // tapping a row re-sends its exact name through this same pipeline,
+  // which then resolves as a direct match).
   if (looksLikeBareFoodName(userText)) {
-    const item = await lookupFoodByName(userText.trim(), env);
-    const card = formatFoodResult(item);
-    if (card) {
-      await sendWhatsAppReply(from, card, env);
-      const context = toFoodContext(item);
-      if (context) ctx.waitUntil(saveLastFoodContext(from, context, env));
-      return;
+    const query = userText.trim();
+    const candidates = await lookupFoodCandidates(query, env, 3);
+    const [top] = candidates;
+
+    if (top && (candidates.length === 1 || isDirectFoodMatch(query, top))) {
+      const card = formatFoodResult(top);
+      if (card) {
+        await sendWhatsAppReply(from, card, env);
+        const context = toFoodContext(top);
+        if (context) ctx.waitUntil(saveLastFoodContext(from, context, env));
+        return;
+      }
+    } else if (candidates.length > 1) {
+      const sent = await sendFoodOptionsList(from, query, candidates, env);
+      if (sent) return;
     }
   }
 
@@ -595,6 +614,39 @@ async function lookupFoodByName(name, env) {
   if (!res.ok) return null;
   const body = await res.json();
   return Array.isArray(body?.data) ? body.data[0] : body?.data || null;
+}
+
+// Same endpoint as lookupFoodByName, but keeps up to `limit` ranked
+// candidates instead of just the best one — used by the bare-food-name
+// search path so a non-exact match can be offered as a pick list instead
+// of a single (possibly wrong) guess. A barcode lookup's `data` is a
+// single object, not a list — normalize that to a 1-item array too.
+async function lookupFoodCandidates(name, env, limit = 3) {
+  const res = await env.CHAKUDYA_API.fetch(
+    `https://chakudya-api/foods/lookup?q=${encodeURIComponent(name)}`
+  );
+  if (!res.ok) return [];
+  const body = await res.json().catch(() => null);
+  const data = body?.data;
+  if (Array.isArray(data)) return data.slice(0, limit);
+  return data ? [data] : [];
+}
+
+function getFoodItemName(item) {
+  return item?.product_name || item?.food_name || item?.name || null;
+}
+
+// Case/punctuation/whitespace-insensitive equality check, so "Nsima",
+// "nsima." and "  nsima" all still count as a direct match against the
+// item name, while a genuine misspelling or partial name doesn't.
+function normalizeFoodName(s) {
+  return s.trim().toLowerCase().replace(/[^a-z0-9 ]/g, "").replace(/\s+/g, " ");
+}
+
+function isDirectFoodMatch(query, item) {
+  const name = getFoodItemName(item);
+  if (!name) return false;
+  return normalizeFoodName(name) === normalizeFoodName(query);
 }
 
 // A handful of headline nutrients kept for the "highlights" section — the
@@ -2290,6 +2342,50 @@ async function sendWhatsAppInteractiveList(to, { body, buttonText, sections }, e
     console.error("WhatsApp interactive list send error:", res.status, await res.text());
     await sendWhatsAppReply(to, body, env);
   }
+}
+
+// When a bare-food-name search's top /foods/lookup result isn't a direct
+// match for what the person typed, this offers up to 3 close candidates
+// as a tappable WhatsApp list instead of guessing. Tapping a row re-sends
+// its exact name as if the person had typed it (see the "interactive"
+// branch in handleIncomingMessage), which then resolves as a direct match
+// and returns the normal food card. Returns false (nothing sent) if none
+// of the candidates have a usable name, so the caller can fall through to
+// /rag/ask same as any other miss.
+async function sendFoodOptionsList(to, query, candidates, env) {
+  const rows = [];
+  const seen = new Set();
+  for (const item of candidates) {
+    const name = getFoodItemName(item);
+    if (!name) continue;
+    const key = normalizeFoodName(name);
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    // WhatsApp list rows: title max 24 chars, description max 72 chars.
+    const title = name.length > 24 ? `${name.slice(0, 23)}…` : name;
+    const kcal = item.kcal ?? item.energy_kcal;
+    const brand = item.brand || item.raw_data?.brands;
+    const descriptionParts = [];
+    if (brand) descriptionParts.push(brand);
+    if (kcal != null) descriptionParts.push(`${kcal} kcal/100g`);
+    const description = descriptionParts.join(" — ").slice(0, 72) || undefined;
+
+    rows.push({ id: name, title, description });
+    if (rows.length === 3) break;
+  }
+  if (!rows.length) return false;
+
+  await sendWhatsAppInteractiveList(
+    to,
+    {
+      body: `I couldn't find an exact match for "${query}". Did you mean one of these?`,
+      buttonText: "Choose a food",
+      sections: [{ title: "Closest matches", rows }],
+    },
+    env
+  );
+  return true;
 }
 
 // --- Analytics (D1) ---
