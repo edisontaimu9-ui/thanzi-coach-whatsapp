@@ -45,8 +45,6 @@
  *      calcium for a pregnant woman") -> /dri, resolved from an
  *      age/sex/life-stage guess extracted from the message. See
  *      detectDriRequest/lookupDri.
-<<<<<<< HEAD
-=======
  *  14. Plain multi-food descriptions with no "compare"/"vs" wording
  *      ("Orange fleshed sweet potato and parboiled Usipa porridge") ->
  *      resolved via chakudya-api's POST /batch (one /foods/lookup per named
@@ -56,7 +54,6 @@
  *      user as SUBREQUEST_LIMIT_MESSAGE, "couldn't complete your request").
  *      Falls back to /rag/ask if nothing resolves. See
  *      detectMultiFoodList/lookupFoodsViaBatch/formatMultiFoodResults.
->>>>>>> 0b20793 (Route plain multi-food descriptions through /batch instead of /rag/ask (fixes subrequest-limit errors))
  *
  * Required secrets (set with `wrangler secret put <NAME>` — never hardcode these):
  *   WHATSAPP_TOKEN         - Meta permanent/system-user access token
@@ -618,8 +615,6 @@ async function compareFoodsViaChakudya(foodNames, env) {
   }
 
   return lines.join("\n");
-<<<<<<< HEAD
-=======
 }
 
 // Plain "X and Y[, and Z]" food descriptions (no "compare"/"vs" wording, no
@@ -693,7 +688,6 @@ function formatMultiFoodResults(results) {
     lines.push(`\n⚠️ Couldn't find: ${unresolved.join(", ")}`);
   }
   return lines.join("\n");
->>>>>>> 0b20793 (Route plain multi-food descriptions through /batch instead of /rag/ask (fixes subrequest-limit errors))
 }
 
 // Common filler words that end up wrapped around the food name when the
