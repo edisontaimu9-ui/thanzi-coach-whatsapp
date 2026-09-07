@@ -439,11 +439,19 @@ async function handleTextMessage(userText, from, env, ctx) {
   // for pregnancy") just finds no food matches here and continues on.
   //
   // IMPORTANT: "and" isn't always a separator — some dish names legitimately
-  // contain it as part of the name itself, not as a list conjunction. Naively
+  // contain it as part of the name itself, not as a list conjunction (e.g.
+  // "Orange fleshed sweet potato and parboiled Usipa porridge" is a single
+  // named recipe in Chakudya's recipe-book source, not two foods). Naively
   // splitting on every "and" would break those. So before treating the
-  // message as a list at all, try the WHOLE phrase as one food name first;
-  // only fall through to splitting it into separate items if that whole-
-  // phrase lookup finds nothing.
+  // message as a list at all: 1) try the whole phrase as a single
+  // structured food-table entry, 2) if that's not found, try it as a single
+  // concise question to Chakudya (composite dishes often live only in
+  // Chakudya's RAG-indexed sources, not the structured food table) — a
+  // single call, still one invocation, so still safe UNLESS Chakudya's own
+  // retrieval treats it as multiple topics internally and trips the same
+  // subrequest ceiling this whole feature exists to avoid; if it does, that
+  // comes back as SUBREQUEST_LIMIT_MESSAGE and we fall through to 3) the
+  // per-food split/batch approach as the safety net, same as before.
   if (!foodsToCompare) {
     const wholePhraseMatch = await lookupFoodByName(userText.trim(), env);
     const wholePhraseCard = formatFoodResult(wholePhraseMatch);
@@ -455,6 +463,18 @@ async function handleTextMessage(userText, from, env, ctx) {
     }
 
     const foodList = detectMultiFoodList(userText);
+    if (foodList) {
+      const wholePhraseAnswer = await askChakudya(
+        buildConciseNutritionQuery(userText.trim()),
+        from,
+        env
+      );
+      if (wholePhraseAnswer && wholePhraseAnswer !== SUBREQUEST_LIMIT_MESSAGE) {
+        await sendWhatsAppReply(from, wholePhraseAnswer, env);
+        return;
+      }
+    }
+
     if (foodList) {
       const results = await lookupFoodsViaBatch(foodList, env);
       const unresolvedNames = results
@@ -705,19 +725,21 @@ async function lookupFoodsViaBatch(foodNames, env) {
 // per-invocation subrequest ceiling once you combine enough foods. Asking
 // one food per call keeps every call single-topic and within budget. Runs
 // in parallel; one name failing doesn't affect the others.
+// The bare name alone reads as an open-ended question to Chakudya, which
+// can dump every matching recipe/preparation variation it finds (e.g.
+// "parboiled Usipa porridge" -> 5 different recipe-book blends) instead of
+// a single figure — fine for a real question, bad for what's meant to be a
+// quick nutrient lookup. Asking explicitly for one standard estimate keeps
+// it in line with the compact card format batch-resolved foods use.
+function buildConciseNutritionQuery(name) {
+  return `Nutrition facts per 100g for ${name}. If there are multiple preparations or recipe variations, give one representative estimate only — not a breakdown of each.`;
+}
+
 async function resolveUnknownFoodsViaRag(names, fromNumber, env) {
   const settled = await Promise.all(
     names.map(async (name) => {
       try {
-        // The bare name alone reads as an open-ended question to Chakudya,
-        // which can dump every matching recipe/preparation variation it
-        // finds (e.g. "parboiled Usipa porridge" -> 5 different recipe-book
-        // blends) instead of a single figure — fine for a real question,
-        // bad for what's meant to be a quick per-food nutrient lookup.
-        // Asking explicitly for one standard estimate keeps it in line
-        // with the compact card format the batch-resolved foods use.
-        const query = `Nutrition facts per 100g for ${name}. If there are multiple preparations or recipe variations, give one representative estimate only — not a breakdown of each.`;
-        const answer = await askChakudya(query, fromNumber, env);
+        const answer = await askChakudya(buildConciseNutritionQuery(name), fromNumber, env);
         return { name, answer };
       } catch (err) {
         console.error("resolveUnknownFoodsViaRag failed for", name, err);
