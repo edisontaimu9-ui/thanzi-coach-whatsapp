@@ -437,7 +437,23 @@ async function handleTextMessage(userText, from, env, ctx) {
   // to the normal flow (below) if NEITHER approach resolves anything, so a
   // genuine question that happens to contain "and" (e.g. "iron and folate
   // for pregnancy") just finds no food matches here and continues on.
+  //
+  // IMPORTANT: "and" isn't always a separator — some dish names legitimately
+  // contain it as part of the name itself, not as a list conjunction. Naively
+  // splitting on every "and" would break those. So before treating the
+  // message as a list at all, try the WHOLE phrase as one food name first;
+  // only fall through to splitting it into separate items if that whole-
+  // phrase lookup finds nothing.
   if (!foodsToCompare) {
+    const wholePhraseMatch = await lookupFoodByName(userText.trim(), env);
+    const wholePhraseCard = formatFoodResult(wholePhraseMatch);
+    if (wholePhraseCard) {
+      await sendWhatsAppReply(from, wholePhraseCard, env);
+      const context = toFoodContext(wholePhraseMatch);
+      if (context) ctx.waitUntil(saveLastFoodContext(from, context, env));
+      return;
+    }
+
     const foodList = detectMultiFoodList(userText);
     if (foodList) {
       const results = await lookupFoodsViaBatch(foodList, env);
