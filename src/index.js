@@ -693,7 +693,15 @@ async function resolveUnknownFoodsViaRag(names, fromNumber, env) {
   const settled = await Promise.all(
     names.map(async (name) => {
       try {
-        const answer = await askChakudya(name, fromNumber, env);
+        // The bare name alone reads as an open-ended question to Chakudya,
+        // which can dump every matching recipe/preparation variation it
+        // finds (e.g. "parboiled Usipa porridge" -> 5 different recipe-book
+        // blends) instead of a single figure — fine for a real question,
+        // bad for what's meant to be a quick per-food nutrient lookup.
+        // Asking explicitly for one standard estimate keeps it in line
+        // with the compact card format the batch-resolved foods use.
+        const query = `Nutrition facts per 100g for ${name}. If there are multiple preparations or recipe variations, give one representative estimate only — not a breakdown of each.`;
+        const answer = await askChakudya(query, fromNumber, env);
         return { name, answer };
       } catch (err) {
         console.error("resolveUnknownFoodsViaRag failed for", name, err);
