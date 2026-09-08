@@ -16,36 +16,26 @@
  *      (see handleAudioMessage) — a spoken food name or question works
  *      exactly like a typed one.
  *   6. Reply sent back via the WhatsApp Cloud API.
- *   7. Food diary: "log it" / "log 150g" / "log it as dinner" saves the
- *      most recently discussed food to chakudya-api's /log (food_log_entries),
- *      keyed by WhatsApp number as user_id; "today" / "this week" reads it
- *      back via /log/summary. See detectLogCommand/detectLogSummaryCommand.
- *      No new D1 table needed — piggybacks on the existing
- *      last_food_context row already used for gram-based follow-ups.
- *   8. Multi-ingredient meal logging: "log 2 eggs, 1 cup rice and chicken"
- *      -> chakudya-api's /ingredients/parse (free text -> structured
- *      ingredients) -> /meals/analyze (resolves + totals nutrients) -> one
- *      /log entry for the whole meal. See detectMealLogCommand.
- *   9. Nutrient comparison ("compare nsima, rice and potatoes") uses
+ *   7. Nutrient comparison ("compare nsima, rice and potatoes") uses
  *      chakudya-api's /foods/compare directly (2-6 foods, real per-100g
  *      panel + highest/lowest flags + sourced glycaemic data where
  *      available) instead of hand-built side-by-side cards. See
  *      detectFoodComparison/compareFoodsViaChakudya.
- *  10. Food substitutions ("substitute for nsima") -> /foods/substitutes.
+ *   8. Food substitutions ("substitute for nsima") -> /foods/substitutes.
  *      See detectSubstituteRequest.
- *  11. Drug-nutrient interactions ("interactions with warfarin", "foods to
+ *   9. Drug-nutrient interactions ("interactions with warfarin", "foods to
  *      avoid while taking metformin") -> /drug-interactions/search, a
  *      structured clinical reference table rather than RAG's general
  *      retrieval. See detectDrugInteractionQuery.
- *  12. Nutrition label ("nutrition label for rice") -> /foods (to resolve
+ *  10. Nutrition label ("nutrition label for rice") -> /foods (to resolve
  *      a local food id) then /foods/:id/label for a Codex-style label.
  *      Only works for foods in the local Malawi FCT table (needs a numeric
  *      id) — see detectLabelRequest/getFoodLabel.
- *  13. Dietary Reference Intakes ("how much iron do I need", "RDA for
+ *  11. Dietary Reference Intakes ("how much iron do I need", "RDA for
  *      calcium for a pregnant woman") -> /dri, resolved from an
  *      age/sex/life-stage guess extracted from the message. See
  *      detectDriRequest/lookupDri.
- *  14. Plain multi-food descriptions with no "compare"/"vs" wording
+ *  12. Plain multi-food descriptions with no "compare"/"vs" wording
  *      ("Orange fleshed sweet potato and parboiled Usipa porridge") ->
  *      resolved via chakudya-api's POST /batch (one /foods/lookup per named
  *      food, single call/invocation) instead of one combined /rag/ask.
@@ -255,91 +245,6 @@ async function handleTextMessage(userText, from, env, ctx) {
   if (greetingLang) {
     await sendPromptList(from, greetingLang, env);
     return;
-  }
-
-  // "today" / "this week" — food diary summary. Checked before anything
-  // else short-circuits on these exact phrases (see LOG_SUMMARY_*_PHRASES).
-  const summaryCmd = detectLogSummaryCommand(userText);
-  if (summaryCmd) {
-    const summary = await getLogSummary({ whatsappId: from, period: summaryCmd.period, env });
-    if (summary) {
-      const text = summaryCmd.period === "weekly" ? formatWeeklySummary(summary) : formatDailySummary(summary);
-      await sendWhatsAppReply(from, text, env);
-      return;
-    }
-    await sendWhatsAppReply(from, "Sindinathe kupeza zolembedwa zanu pa nthawi ino. Chonde yesaninso. 🙏", env);
-    return;
-  }
-
-  // "log it" / "log 150g" / "log it as dinner" — save the most recently
-  // discussed food (see last_food_context) to the diary. Only fires on a
-  // narrow set of phrasings (see detectLogCommand); anything naming a food
-  // directly falls through to the normal flow below instead.
-  const logCmd = detectLogCommand(userText);
-  if (logCmd) {
-    const context = await getLastFoodContext(from, env);
-    if (!context) {
-      await sendWhatsAppReply(
-        from,
-        "Ndikanakonda kudziwa chakudya choyamba — tumizani dzina la chakudya kaye, kenako muzitha kunena \"log it\". 🙏",
-        env
-      );
-      return;
-    }
-    const grams = logCmd.grams ?? context.lastShownGrams ?? context.baseGrams;
-    const calories = kcalAtGrams(context, grams);
-    if (calories == null) {
-      await sendWhatsAppReply(from, "Sindinathe kuwerengera ma calories a chakudyachi. Chonde yesaninso. 🙏", env);
-      return;
-    }
-    const mealType = logCmd.mealType || inferMealTypeFromHour(currentHourInMalawi());
-    const logged = await logFoodEntry({ whatsappId: from, mealType, calories, foodName: context.name, env });
-    if (logged) {
-      await sendWhatsAppReply(
-        from,
-        `Logged: *${context.name}* (${grams} g, ${calories} kcal) under ${MEAL_LABELS[mealType]}. ✅\nSay "today" any time to see your daily total.`,
-        env
-      );
-    } else {
-      await sendWhatsAppReply(from, "Sindinathe kulemba izi pa nthawi ino. Chonde yesaninso. 🙏", env);
-    }
-    return;
-  }
-
-  // Multi-ingredient meal logging ("log 2 eggs, 1 cup rice and chicken")
-  // — checked right after the single-food log command above since it's the
-  // same "log" intent, just with more than one item. detectLogCommand
-  // above only matches when nothing but grams/meal-type/filler words
-  // remain, so a real ingredient list always falls through to here instead.
-  const mealLogCmd = detectMealLogCommand(userText);
-  if (mealLogCmd) {
-    const analysis = await parseAndAnalyzeMeal(mealLogCmd.text, env);
-    if (analysis && (analysis.ingredients?.length || analysis.unresolved_ingredients?.length)) {
-      const mealType = mealLogCmd.mealType || inferMealTypeFromHour(currentHourInMalawi());
-      await sendWhatsAppReply(from, formatMealAnalysis(analysis, mealType), env);
-
-      const totalKcal = analysis.total_nutrients?.kcal ?? analysis.total_nutrients?.energy_kcal;
-      if (totalKcal != null && analysis.ingredients?.length) {
-        const logged = await logFoodEntry({
-          whatsappId: from,
-          mealType,
-          calories: Math.round(totalKcal),
-          foodName: summarizeMealName(analysis.ingredients),
-          env,
-        });
-        if (logged) {
-          await sendWhatsAppReply(
-            from,
-            `Logged as ${MEAL_LABELS[mealType]}: ${Math.round(totalKcal)} kcal total. ✅`,
-            env
-          );
-        }
-      }
-      return;
-    }
-    // Parsing/analysis failed entirely (e.g. Groq unavailable, nothing
-    // resolvable) — fall through to the normal flow below rather than
-    // leaving the user with no response at all.
   }
 
   if (looksLikeBarcode(userText)) {
@@ -934,233 +839,6 @@ function detectServingOnly(query) {
   return { grams };
 }
 
-// --- Food diary (chakudya-api's /log and /log/summary) ---
-//
-// "log it" / "log 150g" / "log it as dinner" saves whatever food was most
-// recently discussed (see last_food_context) as a diary entry. Deliberately
-// narrow in what it accepts: the message must start with an explicit
-// log/save/record/add verb, and everything else in it must be either a
-// gram amount, a meal-type word, or one of a short list of filler words
-// ("it", "this", "to", "my", "diary", ...) — if anything else is left over
-// (e.g. "log my rice porridge", naming a food directly rather than
-// referring to one already discussed), this returns null and the message
-// falls through to the normal flow instead of silently mis-logging or
-// swallowing what might actually be a real question.
-const LOG_MEAL_TYPES = ["breakfast", "lunch", "dinner", "snack"];
-const LOG_FILLER_WORDS = new Set([
-  "log", "save", "record", "add", "it", "this", "that", "to", "my", "the",
-  "diary", "food", "as", "please", "now", "in",
-]);
-
-function detectLogCommand(text) {
-  const t = text.trim();
-  if (!/^(log|save|record|add)\b/i.test(t)) return null;
-
-  let grams = null;
-  let withoutGrams = t;
-  const gramMatch = t.match(/(\d+(?:\.\d+)?)\s*g(?:rams)?\b/i);
-  if (gramMatch) {
-    grams = Number(gramMatch[1]);
-    if (!(grams > 0 && grams < 10000)) return null;
-    withoutGrams = t.slice(0, gramMatch.index) + t.slice(gramMatch.index + gramMatch[0].length);
-  }
-
-  let mealType = null;
-  const words = withoutGrams
-    .toLowerCase()
-    .replace(/[?.!,]/g, "")
-    .split(/\s+/)
-    .filter(Boolean);
-
-  const leftover = words.filter((w) => {
-    if (LOG_MEAL_TYPES.includes(w)) {
-      mealType = w;
-      return false;
-    }
-    return !LOG_FILLER_WORDS.has(w);
-  });
-  if (leftover.length > 0) return null;
-
-  return { grams, mealType };
-}
-
-// "today" / "my log" / "this week" — exact-phrase allowlist (not a
-// substring match) so a real question that happens to contain "today"
-// ("How many calories should I eat today?") is left alone and still goes
-// to /rag/ask instead of being swallowed here.
-const LOG_SUMMARY_DAILY_PHRASES = new Set([
-  "today", "my log", "food log", "my diary", "diary", "today's log",
-  "daily summary", "log summary", "show my log", "show my diary",
-  "what did i eat today", "what have i eaten today",
-]);
-const LOG_SUMMARY_WEEKLY_PHRASES = new Set([
-  "this week", "weekly summary", "week summary", "my week",
-  "this week's log", "what did i eat this week",
-]);
-
-function detectLogSummaryCommand(text) {
-  const t = text.trim().toLowerCase().replace(/[?.!]+$/, "");
-  if (LOG_SUMMARY_WEEKLY_PHRASES.has(t)) return { period: "weekly" };
-  if (LOG_SUMMARY_DAILY_PHRASES.has(t)) return { period: "daily" };
-  return null;
-}
-
-// Malawi runs on CAT (UTC+2) year-round (no DST) — used only to pick a
-// sensible default meal type when the user doesn't say one, so a plain
-// "log it" doesn't force an extra round-trip asking which meal this was.
-function currentHourInMalawi() {
-  return (new Date().getUTCHours() + 2) % 24;
-}
-
-function inferMealTypeFromHour(hour) {
-  if (hour >= 5 && hour < 11) return "breakfast";
-  if (hour >= 11 && hour < 15) return "lunch";
-  if (hour >= 17 && hour < 21) return "dinner";
-  return "snack";
-}
-
-// POST /log — see sql/002_add_food_log_entries.sql in chakudya-api.
-// user_id is the WhatsApp number, matching the pattern last_food_context
-// already uses to key per-user state without a separate account system.
-async function logFoodEntry({ whatsappId, mealType, calories, foodName, env }) {
-  const res = await env.CHAKUDYA_API.fetch("https://chakudya-api/log", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      user_id: whatsappId,
-      meal_type: mealType,
-      calories,
-      food_name: foodName,
-    }),
-  });
-  if (!res.ok) return null;
-  const body = await res.json().catch(() => null);
-  return body?.data || null;
-}
-
-async function getLogSummary({ whatsappId, period, env }) {
-  const url = `https://chakudya-api/log/summary?user_id=${encodeURIComponent(whatsappId)}&period=${period}`;
-  const res = await env.CHAKUDYA_API.fetch(url);
-  if (!res.ok) return null;
-  const body = await res.json().catch(() => null);
-  return body?.data || null;
-}
-
-const MEAL_LABELS = { breakfast: "Breakfast", lunch: "Lunch", snack: "Snack", dinner: "Dinner" };
-
-function formatDailySummary(summary) {
-  const lines = [`*Today's log* — ${summary.date}`, `Total: ${Math.round(summary.total_calories)} kcal (${summary.entry_count} item${summary.entry_count === 1 ? "" : "s"})`];
-  for (const meal of LOG_MEAL_TYPES) {
-    const kcal = summary.by_meal?.[meal];
-    if (kcal) lines.push(`${MEAL_LABELS[meal]}: ${Math.round(kcal)} kcal`);
-  }
-  if (summary.entry_count === 0) lines.push("\nNothing logged yet today — say \"log it\" after I show you a food to start.");
-  return lines.join("\n");
-}
-
-function formatWeeklySummary(summary) {
-  const lines = [
-    `*This week's log* — ${summary.start_date} to ${summary.end_date}`,
-    `Total: ${Math.round(summary.total_calories)} kcal · Daily average: ${Math.round(summary.average_daily_calories)} kcal`,
-  ];
-  for (const day of summary.by_date || []) {
-    if (day.total_calories) lines.push(`${day.date}: ${Math.round(day.total_calories)} kcal`);
-  }
-  if (summary.entry_count === 0) lines.push("\nNothing logged yet this week — say \"log it\" after I show you a food to start.");
-  return lines.join("\n");
-}
-
-// --- Multi-ingredient meal logging (/ingredients/parse + /meals/analyze) ---
-//
-// "log 2 eggs, 1 cup rice and chicken" / "ate nsima, beans and greens for
-// dinner" — anything naming more than one food at once. detectLogCommand
-// above only matches a message that's PURELY grams/meal-type/filler words
-// after the verb, so a real ingredient list always falls through to this
-// detector instead. The comma/" and " check is what distinguishes this from
-// a single-food message ("log it as dinner" has neither).
-const MEAL_LOG_LEADING_VERB = /^(i ate|ate|log|save|record|add)\b\s*/i;
-
-function detectMealLogCommand(text) {
-  const t = text.trim();
-  if (!MEAL_LOG_LEADING_VERB.test(t)) return null;
-  if (!t.includes(",") && !/\band\b/i.test(t)) return null;
-
-  let rest = t.replace(MEAL_LOG_LEADING_VERB, "");
-  let mealType = null;
-
-  const trailingMeal = rest.match(/\bas\s+(breakfast|lunch|dinner|snack)\b\s*$/i);
-  if (trailingMeal) {
-    mealType = trailingMeal[1].toLowerCase();
-    rest = rest.slice(0, trailingMeal.index).trim();
-  } else {
-    const leadingMeal = rest.match(/\bfor\s+(breakfast|lunch|dinner|snack)[,:]?\s*/i);
-    if (leadingMeal) {
-      mealType = leadingMeal[1].toLowerCase();
-      rest = (rest.slice(0, leadingMeal.index) + rest.slice(leadingMeal.index + leadingMeal[0].length)).trim();
-    }
-  }
-
-  rest = rest.replace(/[?.!]+$/, "").trim();
-  if (!rest) return null;
-
-  return { text: rest, mealType };
-}
-
-// Chains /ingredients/parse (free text -> structured ingredients) straight
-// into /meals/analyze (resolves each ingredient against local/external food
-// data and totals the nutrients) — Chakudya does all the resolution and
-// arithmetic; this just passes its own output from one endpoint to the
-// next. Returns the /meals/analyze data object, or null on any failure.
-async function parseAndAnalyzeMeal(text, env) {
-  const parseRes = await env.CHAKUDYA_API.fetch("https://chakudya-api/ingredients/parse", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text }),
-  });
-  if (!parseRes.ok) return null;
-  const parseBody = await parseRes.json().catch(() => null);
-  const ingredients = parseBody?.data?.ingredients;
-  if (!Array.isArray(ingredients) || !ingredients.length) return null;
-
-  const analyzeRes = await env.CHAKUDYA_API.fetch("https://chakudya-api/meals/analyze", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ingredients }),
-  });
-  if (!analyzeRes.ok) return null;
-  const analyzeBody = await analyzeRes.json().catch(() => null);
-  return analyzeBody?.data || null;
-}
-
-function formatMealAnalysis(analysis, mealType) {
-  const t = analysis.total_nutrients || {};
-  const kcal = t.kcal ?? t.energy_kcal;
-
-  const lines = [`*Meal analysis* (${MEAL_LABELS[mealType] || mealType})`];
-  const macros = [];
-  if (kcal != null) macros.push(`${Math.round(kcal)} kcal`);
-  if (t.protein_g != null) macros.push(`${t.protein_g}g protein`);
-  if (t.carbs_g != null) macros.push(`${t.carbs_g}g carbs`);
-  if (t.fat_g != null) macros.push(`${t.fat_g}g fat`);
-  if (macros.length) lines.push(macros.join(", "));
-
-  if (analysis.ingredients?.length) {
-    lines.push("");
-    lines.push("Items: " + analysis.ingredients.map((i) => `${i.food_name} (${i.grams}g)`).join(", "));
-  }
-  if (analysis.unresolved_ingredients?.length) {
-    const names = analysis.unresolved_ingredients.map((u) => u.input?.food_name || String(u.input));
-    lines.push(`⚠️ Couldn't match: ${names.join(", ")}`);
-  }
-  return lines.join("\n");
-}
-
-function summarizeMealName(ingredients) {
-  if (!ingredients?.length) return "Mixed meal";
-  const names = ingredients.slice(0, 4).map((i) => i.food_name);
-  return names.join(", ") + (ingredients.length > 4 ? ", +more" : "");
-}
-
 // Extracts the durable bits of a food record we need to re-scale it later
 // (name, its reference gram amount, and its macros AT that reference
 // amount) — this is what gets persisted as "last food discussed" via
@@ -1185,8 +863,8 @@ function toFoodContext(item) {
     // What amount was actually shown to the user for this context — starts
     // equal to baseGrams (the default card), but the foodQty and
     // servingOnly branches in handleTextMessage override this to the
-    // requested amount before saving, so "log it" always logs the SAME
-    // numbers the user just saw, not silently the base/default amount.
+    // requested amount before saving, so a later gram-based follow-up
+    // scales from the SAME numbers the user just saw.
     lastShownGrams: baseGrams,
     kcal: item.kcal ?? item.energy_kcal,
     protein: item.protein_g,
@@ -1198,15 +876,6 @@ function toFoodContext(item) {
     calcium: item.calcium_mg,
     iron: item.iron_mg,
   };
-}
-
-// Scales just the kcal figure from a saved context to a target gram amount
-// — what logFoodEntry needs; the food diary only stores calories, not a
-// full macro/micro breakdown (see food_log_entries schema).
-function kcalAtGrams(context, grams) {
-  if (!context?.baseGrams || context.kcal == null) return null;
-  const factor = grams / context.baseGrams;
-  return Math.round(context.kcal * factor * 10) / 10;
 }
 
 // Scales a saved food context (see toFoodContext) to a target gram amount
