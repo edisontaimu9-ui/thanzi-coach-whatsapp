@@ -81,6 +81,32 @@
 import zxingReaderWasmModule from "zxing-wasm/dist/reader/zxing_reader.wasm";
 import { prepareZXingModule, readBarcodes } from "zxing-wasm/reader";
 
+// Default per-request timeout for outbound HTTP calls (Chakudya, Groq,
+// WhatsApp Cloud API). Without this, a hung upstream stalls the request
+// until the Worker's own wall-clock limit kills it with no clean error;
+// with it, callers get a normal rejected promise at a predictable point,
+// which the existing try/catch in handleIncomingMessage already turns
+// into a friendly reply instead of a silent timeout.
+const FETCH_TIMEOUT_MS = 10000;
+
+async function fetchWithTimeout(fetcher, input, init = {}, timeoutMs = FETCH_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetcher(input, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Thin wrapper for CHAKUDYA_API service-binding calls (see wrangler.toml
+// for why this is a binding, not a public fetch URL). Every Chakudya call
+// site below uses this instead of env.CHAKUDYA_API.fetch directly so none
+// of them can hang past FETCH_TIMEOUT_MS.
+function chakudyaFetch(env, path, init) {
+  return fetchWithTimeout(env.CHAKUDYA_API.fetch.bind(env.CHAKUDYA_API), path, init);
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -141,6 +167,15 @@ async function handleIncomingMessage(request, env, ctx) {
 
   if (!message) {
     return new Response("OK", { status: 200 }); // status callback, nothing to do
+  }
+
+  // Meta redelivers a webhook on any non-200 response or slow reply (see
+  // the comment at the bottom of this function), so the same message.id
+  // can arrive more than once for one real user action. Record it first
+  // and bail out silently on a repeat so a slow upstream never produces a
+  // doubled reply.
+  if (await isDuplicateMessage(message.id, env)) {
+    return new Response("OK", { status: 200 });
   }
 
   const from = message.from; // sender's WhatsApp number
@@ -526,7 +561,7 @@ function detectFoodComparison(query) {
 }
 
 async function lookupFoodByName(name, env) {
-  const res = await env.CHAKUDYA_API.fetch(
+  const res = await chakudyaFetch(env, 
     `https://chakudya-api/foods/lookup?q=${encodeURIComponent(name)}`
   );
   if (!res.ok) return null;
@@ -543,7 +578,7 @@ async function lookupFoodByName(name, env) {
 // cascade — so callers should still fall back to /foods/lookup's own
 // answer when this comes back empty (see the bare-food-name branch above).
 async function searchFoodCandidates(name, env, maxResults = 3) {
-  const res = await env.CHAKUDYA_API.fetch(
+  const res = await chakudyaFetch(env, 
     `https://chakudya-api/foods/search?q=${encodeURIComponent(name)}&max_results=${maxResults}`
   );
   if (!res.ok) return [];
@@ -587,7 +622,7 @@ const COMPARE_HIGHLIGHT_FIELDS = [
 // than 2 of the named foods could be resolved (caller falls back to
 // /rag/ask in that case).
 async function compareFoodsViaChakudya(foodNames, env) {
-  const res = await env.CHAKUDYA_API.fetch(
+  const res = await chakudyaFetch(env, 
     `https://chakudya-api/foods/compare?foods=${encodeURIComponent(foodNames.join(","))}`
   );
   if (res.status === 400) return null; // fewer than 2 resolved — let rag/ask try
@@ -662,7 +697,7 @@ function detectMultiFoodList(text) {
 // per-item miss just comes back with item: null in that slot instead of
 // failing the whole batch.
 async function lookupFoodsViaBatch(foodNames, env) {
-  const res = await env.CHAKUDYA_API.fetch("https://chakudya-api/batch", {
+  const res = await chakudyaFetch(env, "https://chakudya-api/batch", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -1107,7 +1142,7 @@ async function transcribeAudio(bytes, mimeType, env) {
       "kcal, protein, carbs, fat, exchange list, renal diet, potassium, sodium."
   );
 
-  const res = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
+  const res = await fetchWithTimeout(fetch, "https://api.groq.com/openai/v1/audio/transcriptions", {
     method: "POST",
     headers: { Authorization: `Bearer ${env.GROQ_API_KEY}` },
     body: form,
@@ -1194,7 +1229,7 @@ async function decodeBarcodeLocally(imageBytes) {
 // barcode is visible in the image.
 async function readBarcodeFromImage(base64, mimeType, env) {
   const dataUrl = `data:${mimeType};base64,${base64}`;
-  const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+  const res = await fetchWithTimeout(fetch, "https://api.groq.com/openai/v1/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -1234,7 +1269,7 @@ async function readBarcodeFromImage(base64, mimeType, env) {
 // then fetch the actual bytes from that URL (both calls need the same
 // bearer token).
 async function downloadWhatsAppMedia(mediaId, env) {
-  const metaRes = await fetch(`https://graph.facebook.com/v20.0/${mediaId}`, {
+  const metaRes = await fetchWithTimeout(fetch, `https://graph.facebook.com/v20.0/${mediaId}`, {
     headers: { Authorization: `Bearer ${env.WHATSAPP_TOKEN}` },
   });
   if (!metaRes.ok) {
@@ -1242,7 +1277,7 @@ async function downloadWhatsAppMedia(mediaId, env) {
   }
   const meta = await metaRes.json();
 
-  const fileRes = await fetch(meta.url, {
+  const fileRes = await fetchWithTimeout(fetch, meta.url, {
     headers: { Authorization: `Bearer ${env.WHATSAPP_TOKEN}` },
   });
   if (!fileRes.ok) {
@@ -1305,7 +1340,7 @@ function isProviderUnavailable(status) {
 
 async function scanPackagedLabel(base64, mimeType, env) {
   const dataUrl = `data:${mimeType};base64,${base64}`;
-  const res = await env.CHAKUDYA_API.fetch("https://chakudya-api/packaged/scan", {
+  const res = await chakudyaFetch(env, "https://chakudya-api/packaged/scan", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ images: [dataUrl] }),
@@ -1338,7 +1373,7 @@ async function scanPackagedLabel(base64, mimeType, env) {
 }
 
 async function lookupBarcode(barcode, env) {
-  const res = await env.CHAKUDYA_API.fetch(
+  const res = await chakudyaFetch(env, 
     `https://chakudya-api/foods/lookup?barcode=${encodeURIComponent(barcode)}`
   );
   if (!res.ok) {
@@ -1421,7 +1456,7 @@ function detectSubstituteRequest(text) {
 }
 
 async function getFoodSubstitutes(foodName, env) {
-  const res = await env.CHAKUDYA_API.fetch(
+  const res = await chakudyaFetch(env, 
     `https://chakudya-api/foods/substitutes?food_name=${encodeURIComponent(foodName)}`
   );
   if (res.status === 404) return null; // food itself wasn't found — fall back to rag/ask
@@ -1464,7 +1499,7 @@ function detectDrugInteractionQuery(text) {
 }
 
 async function searchDrugInteractions(query, env) {
-  const res = await env.CHAKUDYA_API.fetch(
+  const res = await chakudyaFetch(env, 
     `https://chakudya-api/drug-interactions/search?q=${encodeURIComponent(query)}`
   );
   if (!res.ok) return null;
@@ -1504,7 +1539,7 @@ function detectLabelRequest(text) {
 }
 
 async function getFoodLabel(foodName, env) {
-  const searchRes = await env.CHAKUDYA_API.fetch(
+  const searchRes = await chakudyaFetch(env, 
     `https://chakudya-api/foods?search=${encodeURIComponent(foodName)}&limit=1`
   );
   if (!searchRes.ok) return null;
@@ -1512,7 +1547,7 @@ async function getFoodLabel(foodName, env) {
   const match = Array.isArray(searchBody?.data) ? searchBody.data[0] : null;
   if (!match?.id) return null; // not in the local FCT table — labels aren't available for it
 
-  const labelRes = await env.CHAKUDYA_API.fetch(`https://chakudya-api/foods/${match.id}/label`);
+  const labelRes = await chakudyaFetch(env, `https://chakudya-api/foods/${match.id}/label`);
   if (!labelRes.ok) return null;
   const labelBody = await labelRes.json().catch(() => null);
   if (!labelBody?.data) return null;
@@ -1648,7 +1683,7 @@ async function lookupDri({ nutrientKey, age, sex, lifeStageType }, env) {
   if (sex) params.set("sex", sex);
   if (lifeStageType) params.set("life_stage_type", lifeStageType);
 
-  const res = await env.CHAKUDYA_API.fetch(`https://chakudya-api/dri?${params.toString()}`);
+  const res = await chakudyaFetch(env, `https://chakudya-api/dri?${params.toString()}`);
   if (!res.ok) return null;
   const body = await res.json().catch(() => null);
   return body?.data || null;
@@ -1713,7 +1748,7 @@ function normalizeCitationBrackets(text) {
 async function askChakudya(query, fromNumber, env) {
   // Service binding call — internal Worker-to-Worker, not a public fetch.
   // See wrangler.toml for why (avoids Cloudflare error 1042).
-  const res = await env.CHAKUDYA_API.fetch("https://chakudya-api/rag/ask", {
+  const res = await chakudyaFetch(env, "https://chakudya-api/rag/ask", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -1926,7 +1961,8 @@ async function sendWhatsAppReply(to, text, env) {
   for (let i = 0; i < parts.length; i++) {
     const body = multi ? `${parts[i]}\n\n_(${i + 1}/${parts.length})_` : parts[i];
 
-    const res = await fetch(
+    const res = await fetchWithTimeout(
+      fetch,
       `https://graph.facebook.com/v20.0/${env.PHONE_NUMBER_ID}/messages`,
       {
         method: "POST",
@@ -1997,7 +2033,8 @@ async function sendPromptList(to, lang, env) {
 }
 
 async function sendWhatsAppInteractiveList(to, { body, buttonText, sections }, env) {
-  const res = await fetch(
+  const res = await fetchWithTimeout(
+    fetch,
     `https://graph.facebook.com/v20.0/${env.PHONE_NUMBER_ID}/messages`,
     {
       method: "POST",
@@ -2069,6 +2106,26 @@ async function sendFoodOptionsList(to, query, candidates, env) {
     env
   );
   return true;
+}
+
+// --- Webhook idempotency (D1) ---
+// INSERT OR IGNORE on message_id (the WhatsApp wamid): if the row already
+// existed, D1 reports 0 changed rows, which is how a redelivery is told
+// apart from a first delivery. Fails open — if the D1 write itself errors,
+// treat the message as new rather than silently dropping a real reply.
+async function isDuplicateMessage(messageId, env) {
+  if (!messageId) return false;
+  try {
+    const result = await env.DB.prepare(
+      `INSERT OR IGNORE INTO processed_messages (message_id, ts) VALUES (?1, ?2)`
+    )
+      .bind(messageId, new Date().toISOString())
+      .run();
+    return (result.meta?.changes ?? 1) === 0;
+  } catch (err) {
+    console.error("Dedup check failed, treating message as new:", err);
+    return false;
+  }
 }
 
 // --- Analytics (D1) ---
