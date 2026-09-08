@@ -541,34 +541,47 @@ async function handleTextMessage(userText, from, env, ctx) {
   // /foods/lookup reliably includes a real measure, so route bare names
   // there directly and only fall back to /rag/ask if nothing is found.
   //
-  // /foods/lookup's `q=` search already returns its candidates ranked
-  // best-first (local FCT match, then fuzzy match, then the USDA/OFF/
-  // FatSecret cascade) — but the top hit isn't always what the person
-  // meant, especially for a misspelling or a partial/generic name. Rather
-  // than silently showing (or silently discarding) a possibly-wrong guess,
-  // only auto-show the top result when it's a direct/exact name match;
-  // otherwise offer up to the top 3 candidates as a tappable list so the
-  // person can pick the one they actually meant (see sendFoodOptionsList —
-  // tapping a row re-sends its exact name through this same pipeline,
-  // which then resolves as a direct match).
+  // /foods/lookup always resolves to a single best guess (its own local ->
+  // fuzzy -> USDA/OFF/FatSecret cascade picks one winner internally) — it
+  // never hands back alternatives, so it can't itself power a "did you
+  // mean" list. Chakudya's separate /foods/search endpoint is the one that
+  // actually returns multiple ranked, typo-tolerant candidates (pg_trgm
+  // fuzzy match over the local Malawi FCT table) — see searchFoodCandidates.
+  // So: use /foods/lookup's answer directly when it's a genuine direct/
+  // exact name match; otherwise pull up to 3 candidates from /foods/search
+  // and offer them as a tappable list instead of guessing (see
+  // sendFoodOptionsList — tapping a row re-sends its exact name through
+  // this same pipeline, which then resolves as a direct match). If
+  // /foods/lookup's own answer isn't among those local candidates (e.g. a
+  // non-Malawian food /foods/search can't see, resolved instead via the
+  // external cascade), it's added as an extra option rather than dropped.
   if (looksLikeBareFoodName(userText)) {
     const query = userText.trim();
-    const candidates = await lookupFoodCandidates(query, env, 3);
-    const [top] = candidates;
+    const topResult = await lookupFoodByName(query, env);
 
-    if (top && (candidates.length === 1 || isDirectFoodMatch(query, top))) {
-      const card = formatFoodResult(top);
+    if (topResult && isDirectFoodMatch(query, topResult)) {
+      const card = formatFoodResult(topResult);
       if (card) {
         await sendWhatsAppReply(from, card, env);
-        const context = toFoodContext(top);
+        const context = toFoodContext(topResult);
         if (context) ctx.waitUntil(saveLastFoodContext(from, context, env));
         return;
       }
-    } else if (candidates.length > 1) {
-      const sent = await sendFoodOptionsList(from, query, candidates, env);
-      if (sent) return;
+    } else {
+      const candidates = await searchFoodCandidates(query, env, 3);
+      const topName = topResult ? getFoodItemName(topResult) : null;
+      const alreadyListed =
+        topName &&
+        candidates.some((c) => normalizeFoodName(getFoodItemName(c) || "") === normalizeFoodName(topName));
+      if (topResult && !alreadyListed) candidates.unshift(topResult);
+
+      if (candidates.length) {
+        const sent = await sendFoodOptionsList(from, query, candidates.slice(0, 3), env);
+        if (sent) return;
+      }
     }
   }
+
 
   const answer = await askChakudya(userText, from, env);
   await sendWhatsAppReply(from, answer, env);
@@ -616,20 +629,21 @@ async function lookupFoodByName(name, env) {
   return Array.isArray(body?.data) ? body.data[0] : body?.data || null;
 }
 
-// Same endpoint as lookupFoodByName, but keeps up to `limit` ranked
-// candidates instead of just the best one — used by the bare-food-name
-// search path so a non-exact match can be offered as a pick list instead
-// of a single (possibly wrong) guess. A barcode lookup's `data` is a
-// single object, not a list — normalize that to a 1-item array too.
-async function lookupFoodCandidates(name, env, limit = 3) {
+// GET /foods/search — unlike /foods/lookup (which always collapses to one
+// best-guess winner from local->fuzzy->USDA/OFF/FatSecret), this endpoint
+// runs Chakudya's pg_trgm typo-tolerant fuzzy search directly over the
+// local Malawi FCT table and genuinely returns multiple ranked candidates
+// (see sql/008_add_fuzzy_food_search.sql in chakudya-api). Local-data only
+// — it won't find a non-Malawian food resolved only via the external
+// cascade — so callers should still fall back to /foods/lookup's own
+// answer when this comes back empty (see the bare-food-name branch above).
+async function searchFoodCandidates(name, env, maxResults = 3) {
   const res = await env.CHAKUDYA_API.fetch(
-    `https://chakudya-api/foods/lookup?q=${encodeURIComponent(name)}`
+    `https://chakudya-api/foods/search?q=${encodeURIComponent(name)}&max_results=${maxResults}`
   );
   if (!res.ok) return [];
   const body = await res.json().catch(() => null);
-  const data = body?.data;
-  if (Array.isArray(data)) return data.slice(0, limit);
-  return data ? [data] : [];
+  return Array.isArray(body?.data) ? body.data.slice(0, maxResults) : [];
 }
 
 function getFoodItemName(item) {
