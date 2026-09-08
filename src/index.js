@@ -99,12 +99,44 @@ async function fetchWithTimeout(fetcher, input, init = {}, timeoutMs = FETCH_TIM
   }
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// One retry (2 attempts total) after a short backoff, for a transient 5xx
+// response or the request itself throwing (network blip, or the
+// FETCH_TIMEOUT_MS abort above). Never retries a 4xx — that's a real
+// client-side result (bad query, not found) and retrying would just waste
+// a subrequest and return the same thing. Kept to a single retry to stay
+// well inside Cloudflare's per-invocation subrequest ceiling, which is
+// already tight on some multi-topic queries (see SUBREQUEST_LIMIT_MESSAGE).
+// Used for Chakudya and Groq — read/analyze calls, safe to repeat when the
+// first attempt didn't succeed. NOT used for WhatsApp Cloud API sends:
+// retrying a send that actually went through server-side would double-
+// message the user, which is worse than the occasional failed send.
+const RETRY_BACKOFF_MS = 300;
+
+async function fetchWithRetry(fetcher, input, init = {}, timeoutMs = FETCH_TIMEOUT_MS) {
+  try {
+    const res = await fetchWithTimeout(fetcher, input, init, timeoutMs);
+    if (res.status >= 500 && res.status < 600) {
+      await sleep(RETRY_BACKOFF_MS);
+      return fetchWithTimeout(fetcher, input, init, timeoutMs);
+    }
+    return res;
+  } catch (err) {
+    await sleep(RETRY_BACKOFF_MS);
+    return fetchWithTimeout(fetcher, input, init, timeoutMs);
+  }
+}
+
 // Thin wrapper for CHAKUDYA_API service-binding calls (see wrangler.toml
 // for why this is a binding, not a public fetch URL). Every Chakudya call
 // site below uses this instead of env.CHAKUDYA_API.fetch directly so none
-// of them can hang past FETCH_TIMEOUT_MS.
+// of them can hang past FETCH_TIMEOUT_MS, and a transient 5xx gets one
+// retry instead of surfacing straight to the user.
 function chakudyaFetch(env, path, init) {
-  return fetchWithTimeout(env.CHAKUDYA_API.fetch.bind(env.CHAKUDYA_API), path, init);
+  return fetchWithRetry(env.CHAKUDYA_API.fetch.bind(env.CHAKUDYA_API), path, init);
 }
 
 export default {
@@ -1142,7 +1174,7 @@ async function transcribeAudio(bytes, mimeType, env) {
       "kcal, protein, carbs, fat, exchange list, renal diet, potassium, sodium."
   );
 
-  const res = await fetchWithTimeout(fetch, "https://api.groq.com/openai/v1/audio/transcriptions", {
+  const res = await fetchWithRetry(fetch, "https://api.groq.com/openai/v1/audio/transcriptions", {
     method: "POST",
     headers: { Authorization: `Bearer ${env.GROQ_API_KEY}` },
     body: form,
@@ -1229,7 +1261,7 @@ async function decodeBarcodeLocally(imageBytes) {
 // barcode is visible in the image.
 async function readBarcodeFromImage(base64, mimeType, env) {
   const dataUrl = `data:${mimeType};base64,${base64}`;
-  const res = await fetchWithTimeout(fetch, "https://api.groq.com/openai/v1/chat/completions", {
+  const res = await fetchWithRetry(fetch, "https://api.groq.com/openai/v1/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
