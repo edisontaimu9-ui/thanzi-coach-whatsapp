@@ -395,7 +395,19 @@ async function handleTextMessage(userText, from, env, ctx) {
   // per-food split/batch approach as the safety net, same as before.
   if (!foodsToCompare) {
     const wholePhraseMatch = await lookupFoodByName(userText.trim(), env);
-    const wholePhraseCard = formatFoodResult(wholePhraseMatch);
+    // lookupFoodByName's local->fuzzy(pg_trgm)->external cascade always
+    // picks SOME "best guess" internally, even when nothing genuinely
+    // matches (e.g. "Yams"/"Yam plant" with no yam entry in the local FCT
+    // can fuzzy-match onto an unrelated item like "Beef, raw" or
+    // "Plantain and beef casserole" via loose trigram overlap). Sending
+    // that straight to the user as a confident card — as this branch used
+    // to — reports the wrong food's nutrients with no indication it's a
+    // guess. Require the same exact-name check used for bare food names
+    // below (isDirectFoodMatch) before trusting it; anything looser falls
+    // through to the per-food / bare-name flow further down, which already
+    // offers a proper "did you mean" candidate list instead of guessing.
+    const wholePhraseCard =
+      isDirectFoodMatch(userText.trim(), wholePhraseMatch) && formatFoodResult(wholePhraseMatch);
     if (wholePhraseCard) {
       await sendWhatsAppReply(from, wholePhraseCard, env);
       const context = toFoodContext(wholePhraseMatch);
