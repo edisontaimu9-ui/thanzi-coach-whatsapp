@@ -1765,7 +1765,6 @@ const PROMPT_EXAMPLES_EN = [
   { id: "How much iron do I need?", title: "Daily Nutrient Needs" },
   { id: "Quinoa", title: "Look Up Any Food" },
   { id: "quinoa 200g", title: "Nutrition by Weight" },
-  { id: "today", title: "My Food Diary" },
 ];
 
 const PROMPT_EXAMPLES_NY = [
@@ -1776,7 +1775,6 @@ const PROMPT_EXAMPLES_NY = [
   { id: "How much iron do I need?", title: "Iron Yofunika Tsiku" },
   { id: "Quinoa", title: "Funsani Chakudya" },
   { id: "quinoa 200g", title: "Kulemera kwa Chakudya" },
-  { id: "today", title: "Zakudya Zanu Lero" },
 ];
 
 async function sendPromptList(to, lang, env) {
