@@ -293,6 +293,55 @@ export function matchDriNutrient(phrase) {
   return null;
 }
 
+// --- Meal plan requests (Groq, direct — see generateMealPlan in index.js) ---
+//
+// "Create meal plan for 53 years old woman with diabetes she weighs 90kg &
+// height is 168cm" — these are compound clinical asks (age + sex + weight +
+// height + condition, sometimes several meals/days worth of foods) that
+// blow Chakudya's /rag/ask subrequest ceiling (see the big comment in
+// index.js above SUBREQUEST_LIMIT_MESSAGE) far more reliably than an
+// ordinary multi-food question does, since a meal plan itself fans out
+// into many food items internally. Routed instead to a single direct Groq
+// call (see generateMealPlan) — one subrequest, no Chakudya fan-out.
+// Extracts whatever structured fields the message states (age/sex/weight/
+// height/condition) so Groq gets them as clean data rather than having to
+// re-parse the raw sentence itself; anything not stated is simply omitted
+// rather than guessed.
+export function detectMealPlanRequest(text) {
+  const t = text.trim();
+  if (!/\b(meal|diet|food|menu)\s*plan\b/i.test(t)) return null;
+
+  let sex = null;
+  if (/\b(woman|women|female|girl|lady)\b/i.test(t)) sex = "female";
+  if (/\b(man|men|male|boy)\b/i.test(t)) sex = "male";
+
+  let age = null;
+  const ageMatch = t.match(/\b(\d{1,3})\s*[- ]?\s*(?:years?|yrs?|yo)\s*(?:old)?\b/i);
+  if (ageMatch) age = Number(ageMatch[1]);
+
+  let weightKg = null;
+  const weightMatch = t.match(/\b(\d{2,3}(?:\.\d+)?)\s*kg\b/i);
+  if (weightMatch) weightKg = Number(weightMatch[1]);
+
+  let heightCm = null;
+  const heightCmMatch = t.match(/\b(\d{2,3}(?:\.\d+)?)\s*cm\b/i);
+  const heightMMatch = t.match(/\b(\d(?:\.\d+)?)\s*m(?:eters?|etres?)?\b/i);
+  if (heightCmMatch) heightCm = Number(heightCmMatch[1]);
+  else if (heightMMatch) heightCm = Number(heightMMatch[1]) * 100;
+
+  const conditions = [];
+  if (/\bdiabet/i.test(t)) conditions.push("diabetes");
+  if (/\bhypertension|high blood pressure\b/i.test(t)) conditions.push("hypertension");
+  if (/\b(renal|kidney)\b/i.test(t)) conditions.push("renal disease");
+  if (/\bpregnan/i.test(t)) conditions.push("pregnancy");
+  if (/\blactat|breastfeed/i.test(t)) conditions.push("lactation");
+  if (/\bhiv\b/i.test(t)) conditions.push("HIV");
+  if (/\bmalnutrition|underweight|wasting\b/i.test(t)) conditions.push("malnutrition");
+  if (/\bobes|overweight\b/i.test(t)) conditions.push("obesity");
+
+  return { age, sex, weightKg, heightCm, conditions, rawText: t };
+}
+
 export function detectDriRequest(text) {
   const t = text.trim();
 

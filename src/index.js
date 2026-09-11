@@ -92,6 +92,7 @@ import {
   detectDrugInteractionQuery,
   detectLabelRequest,
   detectDriRequest,
+  detectMealPlanRequest,
 } from "./detectors.js";
 
 // Default per-request timeout for outbound HTTP calls (Chakudya, Groq,
@@ -345,6 +346,20 @@ async function handleTextMessage(userText, from, env, ctx) {
       await sendWhatsAppReply(from, answer, env);
       return;
     }
+  }
+
+  // Meal plan requests ("create a meal plan for a 53 year old woman with
+  // diabetes...") — a single direct Groq call instead of /rag/ask. A meal
+  // plan itself names many foods, so routing it through Chakudya's RAG as
+  // one query reliably blows the subrequest ceiling (see the comment above
+  // SUBREQUEST_LIMIT_MESSAGE) far more than an ordinary compound question
+  // does. See detectMealPlanRequest in ./detectors.js and generateMealPlan
+  // below.
+  const mealPlanReq = detectMealPlanRequest(userText);
+  if (mealPlanReq) {
+    const plan = await generateMealPlan(mealPlanReq, env);
+    await sendWhatsAppReply(from, plan, env);
+    return;
   }
 
   // Nutrient comparisons ("compare nsima, rice and potatoes", "X vs Y") —
@@ -1152,6 +1167,65 @@ async function readBarcodeFromImage(base64, mimeType, env) {
   const raw = body?.choices?.[0]?.message?.content?.trim() || "";
   const digits = raw.replace(/\D/g, "");
   return digits.length >= 8 && digits.length <= 14 ? digits : null;
+}
+
+// Direct Groq text call for meal-plan generation (see detectMealPlanRequest
+// in ./detectors.js for why this bypasses Chakudya's /rag/ask entirely —
+// one subrequest here vs. RAG's per-food internal fan-out, which reliably
+// trips Cloudflare's per-invocation subrequest ceiling on a request shaped
+// like a meal plan). Not grounded in Chakudya's own Malawi FCT data — the
+// prompt just asks Groq to favour common Malawian staples/dishes from its
+// own training, so treat the output as a reasonable draft plan, not a
+// Chakudya-verified nutrient-accurate one the way /foods and /rag/ask are.
+async function generateMealPlan(req, env) {
+  const facts = [];
+  if (req.age) facts.push(`Age: ${req.age} years`);
+  if (req.sex) facts.push(`Sex: ${req.sex}`);
+  if (req.weightKg) facts.push(`Weight: ${req.weightKg} kg`);
+  if (req.heightCm) facts.push(`Height: ${req.heightCm} cm`);
+  if (req.conditions.length) facts.push(`Condition(s): ${req.conditions.join(", ")}`);
+
+  const systemPrompt =
+    "You are a clinical nutrition assistant for Malawi, writing a one-day sample meal plan for " +
+    "WhatsApp. Use everyday Malawian foods and dishes (nsima, beans, pumpkin leaves/nkhwani, " +
+    "groundnuts, usipa, chambo, soya pieces, local fruit, etc.) wherever they fit the person's " +
+    "condition, alongside other suitable foods. Structure the plan by meal (Breakfast, Lunch, " +
+    "Supper, and 1-2 Snacks) with brief portion guidance per item. If a condition like diabetes, " +
+    "hypertension, renal disease, or pregnancy is given, follow standard dietary guidance for it " +
+    "(e.g. for diabetes: consistent carbs, lower-GI starches, limited added sugar). Keep it " +
+    "concise — plain text with short lines and emoji meal headers, NO markdown tables, NO long " +
+    "preamble. End with one short line noting this is a general sample plan, not a substitute for " +
+    "an in-person clinical/dietitian assessment.";
+
+  const userPrompt = facts.length
+    ? `Create a one-day meal plan for a person with these details:\n${facts.join("\n")}`
+    : `Create a general one-day healthy meal plan. Original request: "${req.rawText}"`;
+
+  const res = await fetchWithRetry(fetch, "https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${env.GROQ_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: "llama-3.3-70b-versatile",
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ],
+      temperature: 0.4,
+      max_completion_tokens: 700,
+    }),
+  });
+
+  if (!res.ok) {
+    console.error("Groq meal plan error:", res.status, await res.text());
+    return LLM_BUSY_MESSAGE;
+  }
+
+  const planBody = await res.json();
+  const text = planBody?.choices?.[0]?.message?.content?.trim();
+  return text || LLM_BUSY_MESSAGE;
 }
 
 // WhatsApp media is two-step: first ask Graph API for a short-lived URL,
