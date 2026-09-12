@@ -1297,25 +1297,15 @@ async function generateMealPlan(req, energyResult, env) {
   });
 
   if (!res.ok) {
-    const errBody = await res.text();
-    console.error("Groq meal plan error:", res.status, errBody);
-    // TEMPORARY DEBUG: surfacing the raw Groq error in the reply itself so
-    // it's visible without digging through Cloudflare logs. Revert this
-    // block back to `return LLM_BUSY_MESSAGE;` once the real cause is
-    // found and fixed.
-    return `⚠️ DEBUG — Groq error ${res.status}:\n${errBody.slice(0, 500)}`;
+    console.error("Groq meal plan error:", res.status, await res.text());
+    return LLM_BUSY_MESSAGE;
   }
 
   const planBody = await res.json();
   const text = planBody?.choices?.[0]?.message?.content?.trim();
   if (!text) {
-    // TEMPORARY DEBUG: gpt-oss-120b is a reasoning model — an empty
-    // `content` usually means the reasoning trace consumed the whole
-    // token budget. Show the raw response so we can see finish_reason
-    // and whether reasoning content came back separately. Revert to
-    // `return LLM_BUSY_MESSAGE;` once confirmed fixed.
     console.error("Groq meal plan empty content:", JSON.stringify(planBody).slice(0, 800));
-    return `⚠️ DEBUG — empty content:\n${JSON.stringify(planBody).slice(0, 500)}`;
+    return LLM_BUSY_MESSAGE;
   }
 
   const energyHeader = energyResult
