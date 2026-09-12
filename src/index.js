@@ -762,6 +762,38 @@ async function compareFoodsViaChakudya(foodNames, env) {
     lines.push(`\n⚠️ Couldn't find: ${data.unresolved.join(", ")}`);
   }
 
+  // Same problem this feature originally had for bare-name lookups ("Rice"
+  // resolving to the local "Rice, soaked" with no indication a USDA "Rice,
+  // cooked" also exists) applies here too — /foods/compare resolves each
+  // name via the same local-first cascade. Rather than changing which food
+  // gets compared (that would make the per-100g numbers inconsistent with
+  // what was actually requested), surface the wider-tier alternative as a
+  // note so the person can ask about it directly if the local match wasn't
+  // the preparation they meant.
+  const localFoods = data.foods.filter(
+    (f) => f.matched_source === "local" || f.matched_source === "local_fuzzy"
+  );
+  if (localFoods.length) {
+    const widerResults = await Promise.all(
+      localFoods.map((f) => lookupWiderTierFoodByName(f.requested_as, env))
+    );
+    const altLines = [];
+    localFoods.forEach((f, i) => {
+      const wider = widerResults[i];
+      const widerName = wider ? getFoodItemName(wider) : null;
+      if (!widerName || normalizeFoodName(widerName) === normalizeFoodName(f.food_name)) return;
+      const kcal = wider.energy_kcal ?? wider.kcal;
+      altLines.push(
+        `• "${f.requested_as}" matched *${f.food_name}* locally — ${sourceLabel(wider.source)} also has ` +
+          `*${widerName}*${kcal != null ? ` (${kcal} kcal/100g)` : ""}. Ask about it by name if that's what you meant.`
+      );
+    });
+    if (altLines.length) {
+      lines.push("\n💡 *Other matches available*");
+      lines.push(altLines.join("\n"));
+    }
+  }
+
   return lines.join("\n");
 }
 
