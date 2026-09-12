@@ -1537,7 +1537,7 @@ async function resolveFoodItem(foodName, env) {
     if (kcal == null) return null;
     return {
       name: data.food_name || foodName,
-      servingLabel: "100g (wider CNR tier — no local household-unit serving on file)",
+      servingLabel: "100g",
       kcal: Math.round(kcal),
       source: data.source || "cnr_wider_tier",
     };
@@ -1546,6 +1546,19 @@ async function resolveFoodItem(foodName, env) {
   }
 }
 
+// Sends the meal plan progressively instead of building one big message —
+// WhatsApp has no way to "stream" a single message as it's written (no
+// edit-after-send API for outbound messages), so the only real way to make
+// the answer visibly unfold is to send it as several messages, each as
+// soon as that part is actually ready, rather than waiting for the whole
+// plan to finish and sending it in one block at the end. Concretely:
+// energy target (pure local math — sent before Groq is even called) ->
+// each meal section (sent the moment its foods are resolved against
+// Chakudya, one meal at a time rather than all of them in parallel) ->
+// closing day-total/disclaimer. Returns { meals, resolvedByName } for
+// session-context saving (see the caller in handleTextMessage), or
+// { meals: null, resolvedByName: null } on failure — LLM_BUSY_MESSAGE is
+// sent directly in that case since there's no caller-side text to send.
 async function generateMealPlan(req, energyResult, env) {
   const facts = [];
   if (req.age) facts.push(`Age: ${req.age} years`);
