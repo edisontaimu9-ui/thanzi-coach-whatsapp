@@ -1296,8 +1296,13 @@ async function generateMealPlan(req, energyResult, env) {
   });
 
   if (!res.ok) {
-    console.error("Groq meal plan error:", res.status, await res.text());
-    return LLM_BUSY_MESSAGE;
+    const errBody = await res.text();
+    console.error("Groq meal plan error:", res.status, errBody);
+    // TEMPORARY DEBUG: surfacing the raw Groq error in the reply itself so
+    // it's visible without digging through Cloudflare logs. Revert this
+    // block back to `return LLM_BUSY_MESSAGE;` once the real cause is
+    // found and fixed.
+    return `⚠️ DEBUG — Groq error ${res.status}:\n${errBody.slice(0, 500)}`;
   }
 
   const planBody = await res.json();
