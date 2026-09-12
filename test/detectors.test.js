@@ -87,6 +87,30 @@ describe("detectFoodComparison", () => {
   test("returns null when nothing matches", () => {
     assert.equal(detectFoodComparison("what is nsima"), null);
   });
+
+  test("keeps a trailing preparation word attached to its food, not split out", () => {
+    // Regression: "rice, cooked" used to split into "rice" + "cooked",
+    // with the bare "cooked" then fuzzy-matching onto an unrelated local
+    // food (e.g. "Oats, cooked") instead of describing the rice.
+    assert.deepEqual(
+      detectFoodComparison("compare nsima and rice, cooked"),
+      ["nsima", "rice, cooked"]
+    );
+  });
+
+  test("merges multiple trailing preparation words across a full list", () => {
+    assert.deepEqual(
+      detectFoodComparison("compare rice, cooked and beans, boiled"),
+      ["rice, cooked", "beans, boiled"]
+    );
+  });
+
+  test("still splits a genuine 3-item list with no preparation words", () => {
+    assert.deepEqual(
+      detectFoodComparison("compare nsima, rice and quinoa"),
+      ["nsima", "rice", "quinoa"]
+    );
+  });
 });
 
 describe("detectMultiFoodList", () => {

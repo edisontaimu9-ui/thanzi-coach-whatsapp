@@ -63,16 +63,46 @@ export function detectGreetingLanguage(text) {
   return null;
 }
 
+// A single-word item that's just a cooking/preparation state almost never
+// names its own separate food — it's describing whatever came right before
+// it. "rice, cooked" is ONE food ("rice, cooked" or "rice — cooked"), not
+// "rice" + "cooked" as two comparison targets. This matches Chakudya's own
+// Malawi FCT naming convention, which uses exactly this comma shape
+// ("Rice, soaked", "Oats, cooked", "Maize thick porridge, refined flour").
+// Without this, "compare nsima and rice, cooked" splits into THREE items
+// (nsima/rice/cooked), and the bare "cooked" then fuzzy-matches onto
+// whatever unrelated local food happens to have "cooked" in its name.
+const FOOD_PREPARATION_DESCRIPTORS = new Set([
+  "cooked", "raw", "boiled", "steamed", "fried", "roasted", "grilled",
+  "baked", "soaked", "dried", "mashed", "chopped", "sliced", "ground",
+  "whole", "ripe", "unripe", "fresh", "frozen", "canned", "pickled",
+  "smoked", "cured", "peeled", "shredded", "blanched", "toasted", "stewed",
+]);
+
 // Detects a comparison request naming 2-6 foods, in any of these shapes:
 //   "compare nsima, rice and potatoes"   (comma/and list after "compare")
 //   "100g of X compared with/to Y"
 //   "X vs Y" / "X versus Y"
 // Returns an array of 2-6 trimmed food-name strings, or null.
 export function splitFoodList(text) {
-  return text
+  const rawItems = text
     .split(/\s*,\s*|\s+and\s+|\s*&\s*/i)
     .map((s) => s.trim())
     .filter(Boolean);
+
+  const merged = [];
+  for (const item of rawItems) {
+    const isBarePreparationWord =
+      merged.length > 0 &&
+      !item.includes(" ") &&
+      FOOD_PREPARATION_DESCRIPTORS.has(item.toLowerCase());
+    if (isBarePreparationWord) {
+      merged[merged.length - 1] = `${merged[merged.length - 1]}, ${item}`;
+    } else {
+      merged.push(item);
+    }
+  }
+  return merged;
 }
 
 export const stripTrailingVerb = (s) =>
