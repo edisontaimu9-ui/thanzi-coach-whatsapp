@@ -230,6 +230,22 @@ async function handleIncomingMessage(request, env, ctx) {
 
   const from = message.from; // sender's WhatsApp number
 
+  // Mark the message read and show WhatsApp's native "typing..." indicator
+  // right away — every text/image/audio handler below can take a few
+  // seconds (Groq, Chakudya, or both), and this is the "thinking" signal
+  // Meta actually supports (see sendTypingIndicator). It auto-dismisses the
+  // moment the real reply is sent (sendWhatsAppReply/sendFoodOptionsList),
+  // or after 25s on its own — no separate "done thinking" call needed.
+  // Fire-and-forget: never worth delaying the real work for this.
+  if (
+    message.type === "text" ||
+    message.type === "image" ||
+    message.type === "audio" ||
+    message.type === "interactive"
+  ) {
+    ctx.waitUntil(sendTypingIndicator(message.id, env));
+  }
+
   // Fire-and-forget analytics write — ctx.waitUntil lets it finish after the
   // response is sent, without slowing down or risking the actual reply.
   if (message.type === "text" || message.type === "image" || message.type === "audio" || message.type === "interactive") {
@@ -2286,6 +2302,41 @@ function splitForWhatsApp(text, maxLen = WHATSAPP_MAX_LEN) {
   if (remaining) chunks.push(remaining);
 
   return chunks;
+}
+
+// Marks the incoming message read and shows WhatsApp's native "typing..."
+// bubble — see https://developers.facebook.com/docs/whatsapp/cloud-api/typing-indicators.
+// Requires Graph API v22.0+ (typing_indicator isn't recognized on the
+// older v20.0 this file's other calls use, so this one call pins a newer
+// version rather than bumping the shared one everywhere). Best-effort: a
+// failure here should never block or fail the actual reply, so errors are
+// logged and swallowed, not thrown.
+async function sendTypingIndicator(messageId, env) {
+  try {
+    const res = await fetchWithTimeout(
+      fetch,
+      `https://graph.facebook.com/v22.0/${env.PHONE_NUMBER_ID}/messages`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${env.WHATSAPP_TOKEN}`,
+        },
+        body: JSON.stringify({
+          messaging_product: "whatsapp",
+          status: "read",
+          message_id: messageId,
+          typing_indicator: { type: "text" },
+        }),
+      },
+      5000 // short timeout — this is a nice-to-have, never worth waiting long for
+    );
+    if (!res.ok) {
+      console.error("Typing indicator error:", res.status, await res.text());
+    }
+  } catch (err) {
+    console.error("Failed to send typing indicator:", err);
+  }
 }
 
 async function sendWhatsAppReply(to, text, env) {
