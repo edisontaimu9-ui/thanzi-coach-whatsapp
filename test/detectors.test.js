@@ -13,6 +13,8 @@ import {
   detectDrugInteractionQuery,
   detectLabelRequest,
   detectDriRequest,
+  detectComparisonFollowUp,
+  detectMealPlanEdit,
 } from "../src/detectors.js";
 
 describe("looksLikeBarcode", () => {
@@ -260,5 +262,85 @@ describe("detectDriRequest", () => {
   test("returns null for an unrecognized nutrient or phrasing", () => {
     assert.equal(detectDriRequest("how much love do I need"), null);
     assert.equal(detectDriRequest("what is nsima"), null);
+  });
+});
+
+describe("detectComparisonFollowUp", () => {
+  test("matches 'compare it with X'", () => {
+    assert.deepEqual(detectComparisonFollowUp("compare it with quinoa"), ["quinoa"]);
+  });
+
+  test("matches 'X with it'", () => {
+    assert.deepEqual(detectComparisonFollowUp("compare quinoa with it"), ["quinoa"]);
+  });
+
+  test("matches 'also compare X'", () => {
+    assert.deepEqual(detectComparisonFollowUp("also compare beans"), ["beans"]);
+  });
+
+  test("matches 'add X to the comparison'", () => {
+    assert.deepEqual(detectComparisonFollowUp("add oats to the comparison"), ["oats"]);
+  });
+
+  test("matches 'how does X compare'", () => {
+    assert.deepEqual(detectComparisonFollowUp("how does beans compare"), ["beans"]);
+  });
+
+  test("matches 'what about X too'", () => {
+    assert.deepEqual(detectComparisonFollowUp("what about quinoa too"), ["quinoa"]);
+  });
+
+  test("does not match a fresh comparison", () => {
+    assert.equal(detectComparisonFollowUp("compare nsima and rice"), null);
+  });
+
+  test("does not match an unrelated question", () => {
+    assert.equal(detectComparisonFollowUp("what about my order"), null);
+  });
+});
+
+describe("detectMealPlanEdit", () => {
+  test("matches 'swap X for Y'", () => {
+    assert.deepEqual(detectMealPlanEdit("swap the egg for beans"), {
+      action: "swap",
+      target: "egg",
+      replacement: "beans",
+    });
+  });
+
+  test("matches 'replace X with Y'", () => {
+    assert.deepEqual(detectMealPlanEdit("replace nsima with sweet potato"), {
+      action: "swap",
+      target: "nsima",
+      replacement: "sweet potato",
+    });
+  });
+
+  test("matches 'instead of X use Y'", () => {
+    assert.deepEqual(detectMealPlanEdit("instead of egg use beans"), {
+      action: "swap",
+      target: "egg",
+      replacement: "beans",
+    });
+  });
+
+  test("matches 'remove the X'", () => {
+    assert.deepEqual(detectMealPlanEdit("remove the groundnuts"), {
+      action: "remove",
+      target: "groundnuts",
+      replacement: null,
+    });
+  });
+
+  test("matches 'take out the X'", () => {
+    assert.deepEqual(detectMealPlanEdit("take out the orange"), {
+      action: "remove",
+      target: "orange",
+      replacement: null,
+    });
+  });
+
+  test("does not match an unrelated question", () => {
+    assert.equal(detectMealPlanEdit("what is nsima"), null);
   });
 });

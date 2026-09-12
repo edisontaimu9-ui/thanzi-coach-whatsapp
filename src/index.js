@@ -94,6 +94,8 @@ import {
   detectDriRequest,
   detectMealPlanRequest,
   detectEnergyRequirementRequest,
+  detectComparisonFollowUp,
+  detectMealPlanEdit,
 } from "./detectors.js";
 import { calculateEnergyRequirement } from "./energy.js";
 
@@ -400,8 +402,88 @@ async function handleTextMessage(userText, from, env, ctx) {
       stressFactorKey: mealPlanReq.stressConditionKey,
     });
     const plan = await generateMealPlan(mealPlanReq, energyResult, env);
-    await sendWhatsAppReply(from, plan, env);
+    await sendWhatsAppReply(from, plan.text, env);
+    if (plan.meals) {
+      ctx.waitUntil(
+        saveLastSessionContext(
+          from,
+          "meal_plan",
+          { meals: plan.meals, resolved: Object.fromEntries(plan.resolvedByName), energyResult },
+          env
+        )
+      );
+    }
     return;
+  }
+
+  // Meal-plan edit follow-ups ("swap the egg for beans", "remove the
+  // groundnuts") — applied in place against the stored plan (one Chakudya
+  // lookup for a swap's replacement, none at all for a removal), not a
+  // fresh Groq call. See detectMealPlanEdit in ./detectors.js and
+  // applyMealPlanEdit above.
+  const mealPlanEdit = detectMealPlanEdit(userText);
+  if (mealPlanEdit) {
+    const prevPlan = await getLastSessionContext(from, "meal_plan", env);
+    if (prevPlan?.meals?.length) {
+      const edited = await applyMealPlanEdit(mealPlanEdit, prevPlan, env);
+      if (edited) {
+        await sendWhatsAppReply(from, edited.text, env);
+        ctx.waitUntil(
+          saveLastSessionContext(
+            from,
+            "meal_plan",
+            {
+              meals: edited.meals,
+              resolved: Object.fromEntries(edited.resolvedByName),
+              energyResult: prevPlan.energyResult,
+            },
+            env
+          )
+        );
+        return;
+      }
+      await sendWhatsAppReply(
+        from,
+        `I couldn't find "${mealPlanEdit.target}" in your meal plan to ${mealPlanEdit.action === "remove" ? "remove" : "swap"}. ` +
+          "Check the exact item name from the plan and try again.",
+        env
+      );
+      return;
+    }
+    await sendWhatsAppReply(
+      from,
+      "I don't have an earlier meal plan to edit — ask me to create one first.",
+      env
+    );
+    return;
+  }
+
+  // Comparison follow-ups ("compare it with quinoa", "also compare beans")
+  // — refers back to the previous comparison's food list rather than
+  // naming everything fresh. Checked before the fresh-comparison branch
+  // since its phrasing ("compare it with X") wouldn't match
+  // detectFoodComparison's own patterns anyway, but ordering it first
+  // keeps the intent clear. See detectComparisonFollowUp in ./detectors.js
+  // and last_session_context (migrations/0005) for the stored context.
+  const comparisonFollowUp = detectComparisonFollowUp(userText);
+  if (comparisonFollowUp) {
+    const prevContext = await getLastSessionContext(from, "comparison", env);
+    if (prevContext?.foods?.length) {
+      const merged = [...new Set([...prevContext.foods, ...comparisonFollowUp])].slice(0, 6);
+      const comparison = await compareFoodsViaChakudya(merged, env);
+      if (comparison) {
+        await sendWhatsAppReply(from, comparison, env);
+        ctx.waitUntil(saveLastSessionContext(from, "comparison", { foods: merged }, env));
+        return;
+      }
+    } else {
+      await sendWhatsAppReply(
+        from,
+        "I don't have an earlier comparison to add that to — try \"compare X and Y\" to start one.",
+        env
+      );
+      return;
+    }
   }
 
   // Nutrient comparisons ("compare nsima, rice and potatoes", "X vs Y") —
@@ -414,6 +496,7 @@ async function handleTextMessage(userText, from, env, ctx) {
     const comparison = await compareFoodsViaChakudya(foodsToCompare, env);
     if (comparison) {
       await sendWhatsAppReply(from, comparison, env);
+      ctx.waitUntil(saveLastSessionContext(from, "comparison", { foods: foodsToCompare }, env));
       return;
     }
   }
@@ -1024,6 +1107,51 @@ async function getLastFoodContext(whatsappId, env) {
   }
 }
 
+// Generic version of the above for follow-ups that reference something
+// richer than one food's macros — a whole comparison, or a whole meal
+// plan (see last_session_context in migrations/0005). Keyed by
+// (whatsapp_id, kind) so a user can have both a live comparison and a live
+// meal-plan context at once without either evicting the other. Longer TTL
+// than the bare-gram-followup food context (LAST_FOOD_CONTEXT_TTL_MS,
+// 20 min) — refining a meal plan ("swap the egg for beans") is a slower,
+// more deliberate flow than a quick gram-amount follow-up, so give it more
+// room before treating the conversation as having moved on.
+const LAST_SESSION_CONTEXT_TTL_MS = 60 * 60 * 1000; // 60 minutes
+
+async function saveLastSessionContext(whatsappId, kind, payload, env) {
+  if (!payload) return;
+  try {
+    await env.DB.prepare(
+      `INSERT INTO last_session_context (whatsapp_id, kind, payload_json, updated_at)
+       VALUES (?1, ?2, ?3, ?4)
+       ON CONFLICT(whatsapp_id, kind) DO UPDATE SET
+         payload_json = ?3,
+         updated_at = ?4`
+    )
+      .bind(whatsappId, kind, JSON.stringify(payload), new Date().toISOString())
+      .run();
+  } catch (err) {
+    console.error(`Failed to save last session context (${kind}):`, err);
+  }
+}
+
+async function getLastSessionContext(whatsappId, kind, env) {
+  try {
+    const row = await env.DB.prepare(
+      `SELECT payload_json, updated_at FROM last_session_context WHERE whatsapp_id = ?1 AND kind = ?2`
+    )
+      .bind(whatsappId, kind)
+      .first();
+    if (!row) return null;
+    const age = Date.now() - new Date(row.updated_at).getTime();
+    if (age > LAST_SESSION_CONTEXT_TTL_MS) return null;
+    return JSON.parse(row.payload_json);
+  } catch (err) {
+    console.error(`Failed to load last session context (${kind}):`, err);
+    return null;
+  }
+}
+
 // Looks up a food's per-100g-equivalent record, then scales its kcal/
 // protein/carbs/fat by real arithmetic to the requested gram amount — no
 // LLM involved, so it's both exact and avoids Chakudya's RAG pipeline
@@ -1450,14 +1578,14 @@ async function generateMealPlan(req, energyResult, env) {
 
   if (!res.ok) {
     console.error("Groq meal plan error:", res.status, await res.text());
-    return LLM_BUSY_MESSAGE;
+    return { text: LLM_BUSY_MESSAGE, meals: null, resolvedByName: null };
   }
 
   const planBody = await res.json();
   const rawContent = planBody?.choices?.[0]?.message?.content?.trim();
   if (!rawContent) {
     console.error("Groq meal plan empty content:", JSON.stringify(planBody).slice(0, 800));
-    return LLM_BUSY_MESSAGE;
+    return { text: LLM_BUSY_MESSAGE, meals: null, resolvedByName: null };
   }
 
   let meals;
@@ -1468,11 +1596,11 @@ async function generateMealPlan(req, energyResult, env) {
     meals = JSON.parse(cleaned)?.meals;
   } catch (e) {
     console.error("Groq meal plan JSON parse error:", e.message, rawContent.slice(0, 500));
-    return LLM_BUSY_MESSAGE;
+    return { text: LLM_BUSY_MESSAGE, meals: null, resolvedByName: null };
   }
   if (!Array.isArray(meals) || !meals.length) {
     console.error("Groq meal plan: no meals array in", rawContent.slice(0, 500));
-    return LLM_BUSY_MESSAGE;
+    return { text: LLM_BUSY_MESSAGE, meals: null, resolvedByName: null };
   }
 
   // Resolve every unique proposed food against the Chakudya Nutrition
@@ -1482,6 +1610,19 @@ async function generateMealPlan(req, energyResult, env) {
   const resolvedList = await Promise.all(uniqueNames.map((name) => resolveFoodItem(name, env)));
   const resolvedByName = new Map(uniqueNames.map((name, i) => [name, resolvedList[i]]));
 
+  return {
+    text: renderMealPlanText(meals, resolvedByName, energyResult),
+    meals,
+    resolvedByName,
+  };
+}
+
+// Pure formatting step, shared between a freshly-generated plan
+// (generateMealPlan) and an edited one (applyMealPlanEdit) — takes the
+// meals structure and a Map of resolved Chakudya data (name -> {name,
+// servingLabel, kcal, source} | null) and renders the same WhatsApp text
+// either way, so an edit reply looks identical in shape to the original.
+function renderMealPlanText(meals, resolvedByName, energyResult) {
   const lines = [];
   if (energyResult) {
     lines.push(`📊 Calculated energy target: ${energyResult.adjustedKcalPerDay} kcal/day (${energyResult.equation})`);
@@ -1520,6 +1661,52 @@ async function generateMealPlan(req, energyResult, env) {
   );
 
   return lines.join("\n");
+}
+
+// Applies a swap/remove edit (see detectMealPlanEdit in ./detectors.js) to
+// a stored meal-plan context in place — no new Groq call, since only the
+// one changed item needs resolving against Chakudya (or none at all for a
+// removal). `target` is matched loosely (case-insensitive substring)
+// against the plan's actual item names, since the user's wording won't
+// match Groq's exact phrasing character-for-character. Returns
+// { text, meals, resolvedByName } like generateMealPlan, or null if
+// `target` isn't found anywhere in the plan.
+async function applyMealPlanEdit(edit, storedContext, env) {
+  const meals = storedContext.meals.map((m) => ({ ...m, items: [...m.items] }));
+  const resolvedByName = new Map(Object.entries(storedContext.resolved || {}));
+
+  let matchedMeal = null;
+  let matchedIndex = -1;
+  let matchedName = null;
+  const targetNorm = edit.target.toLowerCase();
+  for (const meal of meals) {
+    const idx = meal.items.findIndex((name) => name.toLowerCase().includes(targetNorm));
+    if (idx !== -1) {
+      matchedMeal = meal;
+      matchedIndex = idx;
+      matchedName = meal.items[idx];
+      break;
+    }
+  }
+  if (!matchedMeal) return null;
+
+  if (edit.action === "remove") {
+    matchedMeal.items.splice(matchedIndex, 1);
+  } else {
+    // swap
+    const replacementItem = await resolveFoodItem(edit.replacement, env);
+    matchedMeal.items[matchedIndex] = edit.replacement;
+    resolvedByName.set(edit.replacement, replacementItem);
+  }
+
+  const nonEmptyMeals = meals.filter((m) => m.items.length > 0);
+  const energyResult = storedContext.energyResult || null;
+  return {
+    text: renderMealPlanText(nonEmptyMeals, resolvedByName, energyResult),
+    meals: nonEmptyMeals,
+    resolvedByName,
+    matchedName,
+  };
 }
 
 // WhatsApp media is two-step: first ask Graph API for a short-lived URL,

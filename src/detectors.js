@@ -505,3 +505,66 @@ export function detectDriRequest(text) {
 
   return { nutrientKey, age, sex, lifeStageType, assumedAge };
 }
+
+// --- Comparison follow-ups ("compare it with X") ---
+//
+// After a comparison ("compare nsima and rice"), a natural next message is
+// "compare it with quinoa too" or "how does beans compare" — referring back
+// to the PREVIOUS comparison's food list rather than naming it fresh. Only
+// fires on an explicit backward reference ("it"/"that"/"this"/"too"/"also")
+// so it doesn't misfire on an unrelated new comparison that happens to use
+// the word "compare". Returns the new food name(s) to add, or null.
+// The caller (handleTextMessage) is responsible for checking there's an
+// actual stored comparison context before treating this as a follow-up —
+// this detector only looks at the text.
+export function detectComparisonFollowUp(text) {
+  const t = text.trim();
+
+  // "compare it/that/this with X" / "compare X with it/that/this"
+  let m = t.match(/\bcompare\s+(?:it|that|this)\s+(?:with|to|and)\s+([a-z0-9 ,()'&-]+?)[?.!]?$/i);
+  if (m) return splitFoodList(m[1]);
+  m = t.match(/\bcompare\s+([a-z0-9 ,()'&-]+?)\s+(?:with|to)\s+(?:it|that|this)[?.!]?$/i);
+  if (m) return splitFoodList(m[1]);
+
+  // "also compare X" / "add X to the comparison" / "and X too"
+  m = t.match(/\balso\s+compare\s+([a-z0-9 ,()'&-]+?)[?.!]?$/i);
+  if (m) return splitFoodList(m[1]);
+  m = t.match(/\badd\s+([a-z0-9 ,()'&-]+?)\s+to\s+(?:the\s+)?comparison[?.!]?$/i);
+  if (m) return splitFoodList(m[1]);
+
+  // "how does X compare" / "what about X" (only the latter needs "too"/
+  // "also" to avoid catching an unrelated "what about X" question)
+  m = t.match(/\bhow\s+(?:does|do)\s+([a-z0-9 ,()'&-]+?)\s+compare\b/i);
+  if (m) return splitFoodList(m[1]);
+  m = t.match(/\bwhat\s+about\s+([a-z0-9 ,()'&-]+?)\s+(?:too|also)[?.!]?$/i);
+  if (m) return splitFoodList(m[1]);
+
+  return null;
+}
+
+// --- Meal-plan edit follow-ups ("swap the egg for beans") ---
+//
+// After a meal plan is generated, "swap the egg for beans", "replace
+// nsima with sweet potato", or "remove the groundnuts" edit it in place
+// (re-resolved against Chakudya, no new Groq call) rather than starting a
+// whole new plan. Returns { action: 'swap'|'remove', target, replacement }
+// — replacement is null for a removal. `target` is matched loosely
+// (substring, case-insensitive) against the stored plan's item names by
+// the caller, not here — this only parses the request's shape.
+export function detectMealPlanEdit(text) {
+  const t = text.trim();
+
+  let m = t.match(/\b(?:swap|replace)\s+(?:the\s+)?([a-z0-9 '-]+?)\s+(?:for|with)\s+([a-z0-9 '-]+?)[?.!]?$/i);
+  if (m) return { action: "swap", target: m[1].trim(), replacement: m[2].trim() };
+
+  m = t.match(/\binstead\s+of\s+([a-z0-9 '-]+?)\s+(?:use|have)\s+([a-z0-9 '-]+?)[?.!]?$/i);
+  if (m) return { action: "swap", target: m[1].trim(), replacement: m[2].trim() };
+
+  m = t.match(/\bremove\s+(?:the\s+)?([a-z0-9 '-]+?)(?:\s+from\s+(?:the\s+)?(?:meal\s+)?plan)?[?.!]?$/i);
+  if (m) return { action: "remove", target: m[1].trim(), replacement: null };
+
+  m = t.match(/\btake\s+out\s+(?:the\s+)?([a-z0-9 '-]+?)[?.!]?$/i);
+  if (m) return { action: "remove", target: m[1].trim(), replacement: null };
+
+  return null;
+}
