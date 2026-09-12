@@ -1234,17 +1234,87 @@ function formatEnergyRequirementResult(result) {
   return lines.join("\n");
 }
 
-// Direct Groq text call for meal-plan generation (see detectMealPlanRequest
-// in ./detectors.js for why this bypasses Chakudya's /rag/ask entirely —
-// one subrequest here vs. RAG's per-food internal fan-out, which reliably
-// trips Cloudflare's per-invocation subrequest ceiling on a request shaped
-// like a meal plan). The FOOD CHOICES themselves are still Groq's own
-// judgement, not grounded in Chakudya's Malawi FCT data — but the ENERGY
-// TARGET, when enough demographic data is given, is real calculated math
-// (Harris-Benedict for adults, Schofield/WHO for children — see
-// calculateEnergyRequirement in ./energy.js and the caller in
-// handleTextMessage), passed to Groq as a fixed constraint rather than left
-// for it to estimate itself, and also shown to the user directly up top.
+// Meal-plan generation, in two passes:
+//
+// Pass 1 (Groq, one call): propose which Malawian/common foods go in each
+// meal slot, given the person's demographics/condition/energy target — but
+// NOT quantities or calories. That's deliberately left to pass 2, since an
+// LLM's calorie/portion numbers are a guess, not a fact.
+//
+// Pass 2 (Chakudya, per unique food — see resolveFoodItem): look each
+// proposed food up in the actual Chakudya Nutrition Registry. For anything
+// in the local Malawi FCT table, this reuses getFoodLabel (the same
+// function nutrition-label requests use), which returns Chakudya's own
+// Serving-Size Intelligence default — a real Malawian household unit
+// (1 chipande of nsima, 1 dzankho of groundnuts, etc. — see
+// SERVING_SIZE_KEYWORDS in chakudya-api) with a grounded gram weight and
+// kcal, not an invented one. Anything not in the local table falls back to
+// the registry's wider USDA/OFF/FatSecret tier, shown as a flat 100g
+// reference since local serving-size intelligence doesn't apply there.
+// Items the registry can't resolve at all are still shown (Groq's
+// suggestion), just without a grounded kcal figure.
+//
+// The final message is assembled here in code from that real data — Groq's
+// job ends at proposing food names, it does not touch the final formatting
+// or numbers.
+//
+// This bypasses /rag/ask (whose internal per-food fan-out reliably blows
+// the subrequest ceiling on a request shaped like a meal plan — see
+// SUBREQUEST_LIMIT_MESSAGE) while still grounding every number in the same
+// registry /rag/ask itself draws from. Item count is capped (see
+// MAX_MEAL_PLAN_ITEMS) to keep the resulting Chakudya lookups (up to 2 per
+// item: local search + label, or 1 for the wider-tier fallback) well
+// inside that ceiling.
+const MAX_MEAL_PLAN_ITEMS = 14;
+
+const MEAL_EMOJI = {
+  breakfast: "🍳",
+  "morning snack": "🥜",
+  snack: "🥜",
+  lunch: "🍲",
+  "afternoon snack": "🍎",
+  supper: "🍽️",
+  dinner: "🍽️",
+};
+
+function emojiForMeal(mealName) {
+  return MEAL_EMOJI[(mealName || "").trim().toLowerCase()] || "🍽️";
+}
+
+// Resolves one proposed food name against the Chakudya Nutrition Registry.
+// Local FCT hit -> real Malawian household-unit serving (via getFoodLabel).
+// Otherwise -> the wider CNR tier (USDA/OFF/FatSecret), flat 100g reference
+// since Serving-Size Intelligence is local-table-only. Null if the
+// registry has nothing at all for this name.
+async function resolveFoodItem(foodName, env) {
+  const local = await getFoodLabel(foodName, env);
+  if (local?.label) {
+    return {
+      name: local.foodName || foodName,
+      servingLabel: local.label.serving_size,
+      kcal: local.label.calories,
+      source: "local_fct",
+    };
+  }
+
+  try {
+    const res = await chakudyaFetch(env, `https://chakudya-api/foods/lookup?q=${encodeURIComponent(foodName)}`);
+    if (!res.ok) return null;
+    const body = await res.json().catch(() => null);
+    const data = Array.isArray(body?.data) ? body.data[0] : body?.data;
+    const kcal = data?.energy_kcal ?? data?.kcal;
+    if (kcal == null) return null;
+    return {
+      name: data.food_name || foodName,
+      servingLabel: "100g (wider CNR tier — no local household-unit serving on file)",
+      kcal: Math.round(kcal),
+      source: data.source || "cnr_wider_tier",
+    };
+  } catch (e) {
+    return null;
+  }
+}
+
 async function generateMealPlan(req, energyResult, env) {
   const facts = [];
   if (req.age) facts.push(`Age: ${req.age} years`);
@@ -1253,30 +1323,24 @@ async function generateMealPlan(req, energyResult, env) {
   if (req.heightCm) facts.push(`Height: ${req.heightCm} cm`);
   if (req.conditions.length) facts.push(`Condition(s): ${req.conditions.join(", ")}`);
   if (energyResult) {
-    facts.push(
-      `Calculated daily energy target: ${energyResult.adjustedKcalPerDay} kcal/day ` +
-        `(${energyResult.equation}${energyResult.stressFactor ? `, stress factor x${energyResult.stressFactor} for ${energyResult.stressFactorLabel}` : ""})`
-    );
+    facts.push(`Daily energy target: ${energyResult.adjustedKcalPerDay} kcal/day`);
   }
 
   const systemPrompt =
-    "You are a clinical nutrition assistant for Malawi, writing a one-day sample meal plan for " +
-    "WhatsApp. Use everyday Malawian foods and dishes (nsima, beans, pumpkin leaves/nkhwani, " +
-    "groundnuts, usipa, chambo, soya pieces, local fruit, etc.) wherever they fit the person's " +
-    "condition, alongside other suitable foods. Structure the plan by meal (Breakfast, Lunch, " +
-    "Supper, and 1-2 Snacks) with brief portion guidance per item. If a condition like diabetes, " +
-    "hypertension, renal disease, or pregnancy is given, follow standard dietary guidance for it " +
-    "(e.g. for diabetes: consistent carbs, lower-GI starches, limited added sugar). If a " +
-    "'Calculated daily energy target' is given, size the plan's total portions to land close to " +
-    "that figure — it's a real calculated number, don't recalculate or second-guess it. Keep it " +
-    "concise — plain text with short lines and emoji meal headers, NO markdown tables, NO long " +
-    "preamble, and do NOT repeat the energy target line (it's already shown to the user " +
-    "separately) — just build the plan to fit it. End with one short line noting this is a " +
-    "general sample plan, not a substitute for an in-person clinical/dietitian assessment.";
+    "You are a clinical nutrition assistant for Malawi. Propose which foods go in a one-day meal " +
+    "plan — Breakfast, Morning Snack, Lunch, Afternoon Snack, Supper — favouring everyday Malawian " +
+    "foods (nsima, beans, pumpkin leaves/nkhwani, groundnuts, usipa, chambo, soya pieces, local " +
+    "fruit, etc.) wherever they fit the person's condition, alongside other suitable foods. If a " +
+    "condition like diabetes, hypertension, renal disease, or pregnancy is given, favour foods " +
+    "that suit it (e.g. for diabetes: lower-GI starches, more vegetables, no sugary items). List " +
+    "1-3 plain food items per meal (simple names only, e.g. 'nsima', 'groundnuts', 'boiled egg', " +
+    "'pumpkin leaves' — NOT full dish descriptions, NOT quantities, NOT calorie numbers; those are " +
+    "resolved separately from real nutrition data). Respond with ONLY a JSON object, no other text, " +
+    'exactly in this shape: {"meals":[{"name":"Breakfast","items":["food name","food name"]}, ...]}.';
 
   const userPrompt = facts.length
-    ? `Create a one-day meal plan for a person with these details:\n${facts.join("\n")}`
-    : `Create a general one-day healthy meal plan. Original request: "${req.rawText}"`;
+    ? `Propose a one-day meal plan's foods for a person with these details:\n${facts.join("\n")}`
+    : `Propose a general one-day healthy meal plan's foods. Original request: "${req.rawText}"`;
 
   const res = await fetchWithRetry(fetch, "https://api.groq.com/openai/v1/chat/completions", {
     method: "POST",
@@ -1290,9 +1354,10 @@ async function generateMealPlan(req, energyResult, env) {
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
       ],
-      temperature: 0.4,
-      max_completion_tokens: 1500,
+      temperature: 0.3,
+      max_completion_tokens: 1200,
       reasoning_effort: "low",
+      response_format: { type: "json_object" },
     }),
   });
 
@@ -1302,16 +1367,72 @@ async function generateMealPlan(req, energyResult, env) {
   }
 
   const planBody = await res.json();
-  const text = planBody?.choices?.[0]?.message?.content?.trim();
-  if (!text) {
+  const rawContent = planBody?.choices?.[0]?.message?.content?.trim();
+  if (!rawContent) {
     console.error("Groq meal plan empty content:", JSON.stringify(planBody).slice(0, 800));
     return LLM_BUSY_MESSAGE;
   }
 
-  const energyHeader = energyResult
-    ? `📊 Calculated energy target: ${energyResult.adjustedKcalPerDay} kcal/day (${energyResult.equation})\n\n`
-    : "";
-  return energyHeader + text;
+  let meals;
+  try {
+    // Strip ```json fences on the off chance the model adds them despite
+    // response_format: json_object.
+    const cleaned = rawContent.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "");
+    meals = JSON.parse(cleaned)?.meals;
+  } catch (e) {
+    console.error("Groq meal plan JSON parse error:", e.message, rawContent.slice(0, 500));
+    return LLM_BUSY_MESSAGE;
+  }
+  if (!Array.isArray(meals) || !meals.length) {
+    console.error("Groq meal plan: no meals array in", rawContent.slice(0, 500));
+    return LLM_BUSY_MESSAGE;
+  }
+
+  // Resolve every unique proposed food against the Chakudya Nutrition
+  // Registry, capped and run concurrently to keep this fast and bounded.
+  const allNames = meals.flatMap((m) => (Array.isArray(m.items) ? m.items : []));
+  const uniqueNames = [...new Set(allNames)].slice(0, MAX_MEAL_PLAN_ITEMS);
+  const resolvedList = await Promise.all(uniqueNames.map((name) => resolveFoodItem(name, env)));
+  const resolvedByName = new Map(uniqueNames.map((name, i) => [name, resolvedList[i]]));
+
+  const lines = [];
+  if (energyResult) {
+    lines.push(`📊 Calculated energy target: ${energyResult.adjustedKcalPerDay} kcal/day (${energyResult.equation})`);
+  }
+
+  let totalKcal = 0;
+  let anyGrounded = false;
+  for (const meal of meals) {
+    if (!meal?.name || !Array.isArray(meal.items) || !meal.items.length) continue;
+    lines.push(`\n${emojiForMeal(meal.name)} *${meal.name}*`);
+    for (const itemName of meal.items) {
+      const item = resolvedByName.get(itemName);
+      if (item?.kcal != null) {
+        anyGrounded = true;
+        totalKcal += item.kcal;
+        lines.push(`• ${item.name} — ${item.servingLabel} (${item.kcal} kcal)`);
+      } else {
+        lines.push(`• ${itemName}`);
+      }
+    }
+  }
+
+  if (anyGrounded) {
+    const vsTarget = energyResult ? ` (target ${energyResult.adjustedKcalPerDay} kcal)` : "";
+    lines.push(`\n*Estimated day total: ~${totalKcal} kcal*${vsTarget}`);
+  }
+
+  lines.push(
+    "",
+    anyGrounded
+      ? "Food data from the Chakudya Nutrition Registry where available; any item shown without a " +
+          "kcal figure wasn't found in the registry. General sample plan, not a substitute for an " +
+          "in-person clinical/dietitian assessment."
+      : "Couldn't match these foods against the Chakudya Nutrition Registry this time — general " +
+          "sample plan only, not a substitute for an in-person clinical/dietitian assessment."
+  );
+
+  return lines.join("\n");
 }
 
 // WhatsApp media is two-step: first ask Graph API for a short-lived URL,
