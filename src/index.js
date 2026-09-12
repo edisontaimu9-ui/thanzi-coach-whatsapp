@@ -592,16 +592,22 @@ async function handleTextMessage(userText, from, env, ctx) {
       // genuinely different food than what's already listed — this is
       // what lets someone pick a generic "rice, cooked" (USDA) instead of
       // only ever being offered the local Malawi FCT's "Rice, soaked".
-      if (widerTierResult) {
-        const widerName = getFoodItemName(widerTierResult);
-        const widerAlreadyListed =
-          widerName &&
-          candidates.some((c) => normalizeFoodName(getFoodItemName(c) || "") === normalizeFoodName(widerName));
-        if (widerName && !widerAlreadyListed) candidates.push(widerTierResult);
-      }
+      // Applies to every bare-name lookup, not just rice. Fixed at 3
+      // total options either way — if the wider-tier match is new, it
+      // takes a reserved slot (bumping the lowest-ranked local candidate)
+      // rather than being tacked on as a 4th, so local and external are
+      // always competing for the same 3 slots, not local-plus-extra.
+      const widerName = widerTierResult ? getFoodItemName(widerTierResult) : null;
+      const widerAlreadyListed =
+        widerName &&
+        candidates.some((c) => normalizeFoodName(getFoodItemName(c) || "") === normalizeFoodName(widerName));
+      const finalCandidates =
+        widerName && !widerAlreadyListed
+          ? [...candidates.slice(0, 2), widerTierResult]
+          : candidates;
 
-      if (candidates.length) {
-        const sent = await sendFoodOptionsList(from, query, candidates.slice(0, 4), env);
+      if (finalCandidates.length) {
+        const sent = await sendFoodOptionsList(from, query, finalCandidates.slice(0, 3), env);
         if (sent) return;
       }
     }
@@ -2200,7 +2206,7 @@ async function sendFoodOptionsList(to, query, candidates, env) {
     const description = descriptionParts.join(" — ").slice(0, 72) || undefined;
 
     rows.push({ id: name, title, description });
-    if (rows.length === 4) break;
+    if (rows.length === 3) break;
   }
   if (!rows.length) return false;
 
