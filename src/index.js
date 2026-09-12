@@ -1291,7 +1291,8 @@ async function generateMealPlan(req, energyResult, env) {
         { role: "user", content: userPrompt },
       ],
       temperature: 0.4,
-      max_completion_tokens: 700,
+      max_completion_tokens: 1500,
+      reasoning_effort: "low",
     }),
   });
 
@@ -1307,7 +1308,15 @@ async function generateMealPlan(req, energyResult, env) {
 
   const planBody = await res.json();
   const text = planBody?.choices?.[0]?.message?.content?.trim();
-  if (!text) return LLM_BUSY_MESSAGE;
+  if (!text) {
+    // TEMPORARY DEBUG: gpt-oss-120b is a reasoning model — an empty
+    // `content` usually means the reasoning trace consumed the whole
+    // token budget. Show the raw response so we can see finish_reason
+    // and whether reasoning content came back separately. Revert to
+    // `return LLM_BUSY_MESSAGE;` once confirmed fixed.
+    console.error("Groq meal plan empty content:", JSON.stringify(planBody).slice(0, 800));
+    return `⚠️ DEBUG — empty content:\n${JSON.stringify(planBody).slice(0, 500)}`;
+  }
 
   const energyHeader = energyResult
     ? `📊 Calculated energy target: ${energyResult.adjustedKcalPerDay} kcal/day (${energyResult.equation})\n\n`
