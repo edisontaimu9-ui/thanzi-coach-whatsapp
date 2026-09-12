@@ -578,15 +578,30 @@ async function handleTextMessage(userText, from, env, ctx) {
         return;
       }
     } else {
-      const candidates = await searchFoodCandidates(query, env, 3);
+      const [candidates, widerTierResult] = await Promise.all([
+        searchFoodCandidates(query, env, 3),
+        lookupWiderTierFoodByName(query, env),
+      ]);
       const topName = topResult ? getFoodItemName(topResult) : null;
       const alreadyListed =
         topName &&
         candidates.some((c) => normalizeFoodName(getFoodItemName(c) || "") === normalizeFoodName(topName));
       if (topResult && !alreadyListed) candidates.unshift(topResult);
 
+      // Add the wider-tier (USDA/OFF/FatSecret) match too, when it's a
+      // genuinely different food than what's already listed — this is
+      // what lets someone pick a generic "rice, cooked" (USDA) instead of
+      // only ever being offered the local Malawi FCT's "Rice, soaked".
+      if (widerTierResult) {
+        const widerName = getFoodItemName(widerTierResult);
+        const widerAlreadyListed =
+          widerName &&
+          candidates.some((c) => normalizeFoodName(getFoodItemName(c) || "") === normalizeFoodName(widerName));
+        if (widerName && !widerAlreadyListed) candidates.push(widerTierResult);
+      }
+
       if (candidates.length) {
-        const sent = await sendFoodOptionsList(from, query, candidates.slice(0, 3), env);
+        const sent = await sendFoodOptionsList(from, query, candidates.slice(0, 4), env);
         if (sent) return;
       }
     }
@@ -609,6 +624,23 @@ async function lookupFoodByName(name, env) {
   return Array.isArray(body?.data) ? body.data[0] : body?.data || null;
 }
 
+// Same as lookupFoodByName, but forces chakudya-api's wider USDA/OFF/
+// FatSecret tier via ?tier=wider, skipping the local Malawi FCT match
+// entirely. Local FCT entries are sometimes a different preparation than
+// what a plain name implies (e.g. the local "Rice, soaked" entry vs. a
+// generic "rice, cooked" ask) — this gives a second, source-labelled
+// option in that case instead of only ever offering the local match.
+async function lookupWiderTierFoodByName(name, env) {
+  const res = await chakudyaFetch(
+    env,
+    `https://chakudya-api/foods/lookup?q=${encodeURIComponent(name)}&tier=wider`
+  );
+  if (!res.ok) return null;
+  const body = await res.json().catch(() => null);
+  const data = Array.isArray(body?.data) ? body.data[0] : body?.data;
+  return data ? { ...data, _widerTier: true } : null;
+}
+
 // GET /foods/search — unlike /foods/lookup (which always collapses to one
 // best-guess winner from local->fuzzy->USDA/OFF/FatSecret), this endpoint
 // runs Chakudya's pg_trgm typo-tolerant fuzzy search directly over the
@@ -628,6 +660,23 @@ async function searchFoodCandidates(name, env, maxResults = 3) {
 
 function getFoodItemName(item) {
   return item?.product_name || item?.food_name || item?.name || null;
+}
+
+// Short human-readable label for a wider-tier match's source tag, shown in
+// the disambiguation list so it's clear why this option differs from the
+// local Malawi FCT ones (see lookupWiderTierFoodByName).
+function sourceLabel(source) {
+  switch (source) {
+    case "usda_fdc":
+      return "USDA";
+    case "off":
+    case "open_food_facts":
+      return "Open Food Facts";
+    case "fatsecret":
+      return "FatSecret";
+    default:
+      return "wider CNR tier";
+  }
 }
 
 // Case/punctuation/whitespace-insensitive equality check, so "Nsima",
@@ -2145,12 +2194,13 @@ async function sendFoodOptionsList(to, query, candidates, env) {
     const kcal = item.kcal ?? item.energy_kcal;
     const brand = item.brand || item.raw_data?.brands;
     const descriptionParts = [];
+    if (item._widerTier) descriptionParts.push(sourceLabel(item.source));
     if (brand) descriptionParts.push(brand);
     if (kcal != null) descriptionParts.push(`${kcal} kcal/100g`);
     const description = descriptionParts.join(" — ").slice(0, 72) || undefined;
 
     rows.push({ id: name, title, description });
-    if (rows.length === 3) break;
+    if (rows.length === 4) break;
   }
   if (!rows.length) return false;
 
