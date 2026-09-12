@@ -293,6 +293,48 @@ export function matchDriNutrient(phrase) {
   return null;
 }
 
+// --- Clinical stress condition (Barak et al 2002 stress factor table) ---
+//
+// Maps a mentioned condition to the same stress_factor_table keys used by
+// chakudya-mcp-server-cloudflare's harrisBenedictStressFactorTools.ts /
+// ./energy.js STRESS_FACTOR_TABLE. Ordered most-specific first (e.g.
+// "severe sepsis" before plain "sepsis/infection") since only ONE factor
+// should ever be applied — per source, never stacked. Returns the first
+// matching key, or null if no recognized stress condition is mentioned
+// (most outpatient/meal-plan requests won't have one, which is expected —
+// calculateEnergyRequirement just skips the stress multiplier in that case).
+const STRESS_CONDITION_PATTERNS = [
+  ["sepsis_severe", /\b(severe sepsis|septic shock)\b/i],
+  ["icu_septic", /\bicu\b.*\bsept/i],
+  ["sepsis_mild", /\b(sepsis|infection)\b/i],
+  ["multiple_trauma", /\btrauma\b/i],
+  ["fracture", /\bfracture(d)?\b/i],
+  ["tbi_closed_head_injury", /\b(tbi|traumatic brain injury|head injury|closed head injury)\b/i],
+  ["acute_spinal_cord_injury", /\bspinal cord injury\b/i],
+  ["organ_transplantation", /\btransplant/i],
+  ["active_ibd", /\b(ibd|crohn|ulcerative colitis)\b/i],
+  ["peritonitis", /\bperitonitis\b/i],
+  ["respiratory_failure_copd", /\b(copd|respiratory failure)\b/i],
+  ["active_tb", /\b(active tb|active tuberculosis)\b/i],
+  ["acute_pancreatitis", /\bpancreatitis\b/i],
+  ["cva", /\b(cva|stroke)\b/i],
+  ["leukaemia", /\bleukaemia|leukemia\b/i],
+  ["lymphoma", /\blymphoma\b/i],
+  ["solid_tumours", /\b(cancer|tumou?r|malignan)/i],
+  ["liver_disease", /\b(liver disease|cirrhosis|hepatic)\b/i],
+  ["wound_healing", /\b(wound|pressure sore|pressure ulcer)\b/i],
+  ["starvation_refeeding", /\b(refeeding|starvation|severe malnutrition)\b/i],
+  ["general_surgery", /\bmajor surgery\b/i],
+  ["postop_no_complication", /\bpost[- ]?op(erative)?\b/i],
+];
+
+export function detectStressCondition(text) {
+  for (const [key, pattern] of STRESS_CONDITION_PATTERNS) {
+    if (pattern.test(text)) return key;
+  }
+  return null;
+}
+
 // --- Meal plan requests (Groq, direct — see generateMealPlan in index.js) ---
 //
 // "Create meal plan for 53 years old woman with diabetes she weighs 90kg &
@@ -307,10 +349,11 @@ export function matchDriNutrient(phrase) {
 // height/condition) so Groq gets them as clean data rather than having to
 // re-parse the raw sentence itself; anything not stated is simply omitted
 // rather than guessed.
-export function detectMealPlanRequest(text) {
-  const t = text.trim();
-  if (!/\b(meal|diet|food|menu)\s*plan\b/i.test(t)) return null;
-
+// --- Shared clinical demographic extraction (age/sex/weight/height/
+// conditions/stress condition) — used by both detectMealPlanRequest and
+// detectEnergyRequirementRequest below so the two intents parse the same
+// fields the same way.
+function extractClinicalDemographics(t) {
   let sex = null;
   if (/\b(woman|women|female|girl|lady)\b/i.test(t)) sex = "female";
   if (/\b(man|men|male|boy)\b/i.test(t)) sex = "male";
@@ -339,7 +382,48 @@ export function detectMealPlanRequest(text) {
   if (/\bmalnutrition|underweight|wasting\b/i.test(t)) conditions.push("malnutrition");
   if (/\bobes|overweight\b/i.test(t)) conditions.push("obesity");
 
-  return { age, sex, weightKg, heightCm, conditions, rawText: t };
+  const stressConditionKey = detectStressCondition(t);
+
+  return { age, sex, weightKg, heightCm, conditions, stressConditionKey, rawText: t };
+}
+
+// --- Meal plan requests (Groq, direct — see generateMealPlan in index.js) ---
+//
+// "Create meal plan for 53 years old woman with diabetes she weighs 90kg &
+// height is 168cm" — these are compound clinical asks (age + sex + weight +
+// height + condition, sometimes several meals/days worth of foods) that
+// blow Chakudya's /rag/ask subrequest ceiling (see the big comment in
+// index.js above SUBREQUEST_LIMIT_MESSAGE) far more reliably than an
+// ordinary multi-food question does, since a meal plan itself fans out
+// into many food items internally. Routed instead to a single direct Groq
+// call (see generateMealPlan) — one subrequest, no Chakudya fan-out.
+// Extracts whatever structured fields the message states (age/sex/weight/
+// height/condition) so Groq gets them as clean data rather than having to
+// re-parse the raw sentence itself; anything not stated is simply omitted
+// rather than guessed.
+export function detectMealPlanRequest(text) {
+  const t = text.trim();
+  if (!/\b(meal|diet|food|menu)\s*plan\b/i.test(t)) return null;
+  return extractClinicalDemographics(t);
+}
+
+// --- Direct energy-requirement calculation requests (no meal plan wording)
+// ---
+//
+// "calculate energy requirements for a 6 year old boy weighing 20kg",
+// "BEE for a 45 year old man, 70kg, 175cm", "how many calories does she
+// need" — a standalone ask for the number itself, answered with real
+// Harris-Benedict/Schofield/WHO math (see ./energy.js), not routed through
+// Groq or /rag/ask at all.
+export function detectEnergyRequirementRequest(text) {
+  const t = text.trim();
+  const isEnergyPhrase =
+    /\b(energy|calorie|caloric|nutrition(al)?)\s+(requirement|need|intake)s?\b/i.test(t) ||
+    /\b(bee|bmr)\b/i.test(t) ||
+    /\bbasal (energy|metabolic) (expenditure|rate)\b/i.test(t) ||
+    /\bhow many calories\b/i.test(t);
+  if (!isEnergyPhrase) return null;
+  return extractClinicalDemographics(t);
 }
 
 export function detectDriRequest(text) {

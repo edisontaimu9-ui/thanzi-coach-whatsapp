@@ -93,7 +93,9 @@ import {
   detectLabelRequest,
   detectDriRequest,
   detectMealPlanRequest,
+  detectEnergyRequirementRequest,
 } from "./detectors.js";
+import { calculateEnergyRequirement } from "./energy.js";
 
 // Default per-request timeout for outbound HTTP calls (Chakudya, Groq,
 // WhatsApp Cloud API). Without this, a hung upstream stalls the request
@@ -348,16 +350,56 @@ async function handleTextMessage(userText, from, env, ctx) {
     }
   }
 
+  // Direct energy-requirement calculation requests ("calculate energy
+  // requirements for a 6 year old boy weighing 20kg", "BEE for a 45 year
+  // old man, 70kg, 175cm") — answered with real Harris-Benedict (adult) /
+  // Schofield-or-WHO (pediatric) math (see ./energy.js), no Groq or
+  // /rag/ask call at all. Checked before the meal-plan branch since these
+  // two intents can otherwise overlap (both parse the same demographic
+  // fields) and a bare calculation request should never fall through to
+  // meal-plan generation.
+  const energyReq = detectEnergyRequirementRequest(userText);
+  if (energyReq) {
+    const result = calculateEnergyRequirement({
+      sex: energyReq.sex,
+      ageYears: energyReq.age,
+      weightKg: energyReq.weightKg,
+      heightCm: energyReq.heightCm,
+      stressFactorKey: energyReq.stressConditionKey,
+    });
+    if (result) {
+      await sendWhatsAppReply(from, formatEnergyRequirementResult(result), env);
+      return;
+    }
+    await sendWhatsAppReply(
+      from,
+      "I need a bit more to calculate that: sex, age, weight (kg), and — for adults or when height is known — " +
+        "height (cm). E.g. \"calculate energy requirements for a 45 year old man, 70kg, 175cm\".",
+      env
+    );
+    return;
+  }
+
   // Meal plan requests ("create a meal plan for a 53 year old woman with
   // diabetes...") — a single direct Groq call instead of /rag/ask. A meal
   // plan itself names many foods, so routing it through Chakudya's RAG as
   // one query reliably blows the subrequest ceiling (see the comment above
   // SUBREQUEST_LIMIT_MESSAGE) far more than an ordinary compound question
   // does. See detectMealPlanRequest in ./detectors.js and generateMealPlan
-  // below.
+  // below. When enough demographic data is given, the plan is grounded on
+  // a real calculated energy target (Harris-Benedict/Schofield/WHO, same as
+  // the standalone energy-requirement branch above) rather than a number
+  // Groq would otherwise have to guess.
   const mealPlanReq = detectMealPlanRequest(userText);
   if (mealPlanReq) {
-    const plan = await generateMealPlan(mealPlanReq, env);
+    const energyResult = calculateEnergyRequirement({
+      sex: mealPlanReq.sex,
+      ageYears: mealPlanReq.age,
+      weightKg: mealPlanReq.weightKg,
+      heightCm: mealPlanReq.heightCm,
+      stressFactorKey: mealPlanReq.stressConditionKey,
+    });
+    const plan = await generateMealPlan(mealPlanReq, energyResult, env);
     await sendWhatsAppReply(from, plan, env);
     return;
   }
@@ -1169,21 +1211,53 @@ async function readBarcodeFromImage(base64, mimeType, env) {
   return digits.length >= 8 && digits.length <= 14 ? digits : null;
 }
 
+// Formats calculateEnergyRequirement's result (see ./energy.js) for a
+// standalone "calculate energy requirements" reply — the real math itself,
+// with the equation named so it's clear this is a calculated figure, not
+// an LLM guess.
+function formatEnergyRequirementResult(result) {
+  const lines = [
+    `📊 *Estimated energy requirement*`,
+    `Equation: ${result.equation}`,
+    `Base (${result.population === "adult" ? "BEE" : "BMR"}): ${result.baseKcalPerDay} kcal/day`,
+  ];
+  if (result.stressFactor) {
+    lines.push(`Stress factor: x${result.stressFactor} (${result.stressFactorLabel})`);
+    lines.push(`*Adjusted: ${result.adjustedKcalPerDay} kcal/day*`);
+  } else {
+    lines.push(`*Total: ${result.adjustedKcalPerDay} kcal/day*`);
+  }
+  lines.push(
+    "",
+    "Reference/estimate only — not a substitute for individualized clinical/dietitian assessment."
+  );
+  return lines.join("\n");
+}
+
 // Direct Groq text call for meal-plan generation (see detectMealPlanRequest
 // in ./detectors.js for why this bypasses Chakudya's /rag/ask entirely —
 // one subrequest here vs. RAG's per-food internal fan-out, which reliably
 // trips Cloudflare's per-invocation subrequest ceiling on a request shaped
-// like a meal plan). Not grounded in Chakudya's own Malawi FCT data — the
-// prompt just asks Groq to favour common Malawian staples/dishes from its
-// own training, so treat the output as a reasonable draft plan, not a
-// Chakudya-verified nutrient-accurate one the way /foods and /rag/ask are.
-async function generateMealPlan(req, env) {
+// like a meal plan). The FOOD CHOICES themselves are still Groq's own
+// judgement, not grounded in Chakudya's Malawi FCT data — but the ENERGY
+// TARGET, when enough demographic data is given, is real calculated math
+// (Harris-Benedict for adults, Schofield/WHO for children — see
+// calculateEnergyRequirement in ./energy.js and the caller in
+// handleTextMessage), passed to Groq as a fixed constraint rather than left
+// for it to estimate itself, and also shown to the user directly up top.
+async function generateMealPlan(req, energyResult, env) {
   const facts = [];
   if (req.age) facts.push(`Age: ${req.age} years`);
   if (req.sex) facts.push(`Sex: ${req.sex}`);
   if (req.weightKg) facts.push(`Weight: ${req.weightKg} kg`);
   if (req.heightCm) facts.push(`Height: ${req.heightCm} cm`);
   if (req.conditions.length) facts.push(`Condition(s): ${req.conditions.join(", ")}`);
+  if (energyResult) {
+    facts.push(
+      `Calculated daily energy target: ${energyResult.adjustedKcalPerDay} kcal/day ` +
+        `(${energyResult.equation}${energyResult.stressFactor ? `, stress factor x${energyResult.stressFactor} for ${energyResult.stressFactorLabel}` : ""})`
+    );
+  }
 
   const systemPrompt =
     "You are a clinical nutrition assistant for Malawi, writing a one-day sample meal plan for " +
@@ -1192,10 +1266,13 @@ async function generateMealPlan(req, env) {
     "condition, alongside other suitable foods. Structure the plan by meal (Breakfast, Lunch, " +
     "Supper, and 1-2 Snacks) with brief portion guidance per item. If a condition like diabetes, " +
     "hypertension, renal disease, or pregnancy is given, follow standard dietary guidance for it " +
-    "(e.g. for diabetes: consistent carbs, lower-GI starches, limited added sugar). Keep it " +
+    "(e.g. for diabetes: consistent carbs, lower-GI starches, limited added sugar). If a " +
+    "'Calculated daily energy target' is given, size the plan's total portions to land close to " +
+    "that figure — it's a real calculated number, don't recalculate or second-guess it. Keep it " +
     "concise — plain text with short lines and emoji meal headers, NO markdown tables, NO long " +
-    "preamble. End with one short line noting this is a general sample plan, not a substitute for " +
-    "an in-person clinical/dietitian assessment.";
+    "preamble, and do NOT repeat the energy target line (it's already shown to the user " +
+    "separately) — just build the plan to fit it. End with one short line noting this is a " +
+    "general sample plan, not a substitute for an in-person clinical/dietitian assessment.";
 
   const userPrompt = facts.length
     ? `Create a one-day meal plan for a person with these details:\n${facts.join("\n")}`
@@ -1225,7 +1302,12 @@ async function generateMealPlan(req, env) {
 
   const planBody = await res.json();
   const text = planBody?.choices?.[0]?.message?.content?.trim();
-  return text || LLM_BUSY_MESSAGE;
+  if (!text) return LLM_BUSY_MESSAGE;
+
+  const energyHeader = energyResult
+    ? `📊 Calculated energy target: ${energyResult.adjustedKcalPerDay} kcal/day (${energyResult.equation})\n\n`
+    : "";
+  return energyHeader + text;
 }
 
 // WhatsApp media is two-step: first ask Graph API for a short-lived URL,
