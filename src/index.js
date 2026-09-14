@@ -1925,15 +1925,26 @@ function formatFoodResult(item) {
   const protein = item.protein_g;
   const carbs = item.carbs_g;
   const fat = item.fat_g;
-  // The "necessary micros" — the handful of micronutrients most relevant
-  // to everyday public-health concerns (blood pressure, bone health,
-  // anemia, digestion) — rather than the full FCT panel, to keep the
-  // WhatsApp card short. Full panel is available via /foods/:id if needed.
+  // The "necessary micros" — the full WHO/Malawi-priority micronutrient
+  // panel (see sql/001_add_micronutrients_to_foods.sql on the Chakudya
+  // side) rather than the raw FCT panel. Each only shows up here if the
+  // source actually has a value for it, so a plain FCT food with just
+  // fiber/sodium/potassium/calcium/iron stays a short card, while a
+  // packaged-food label scan that captured the full panel shows all of it —
+  // useful as an on-the-spot confirmation of what got captured/submitted.
   const fiber = item.fiber_g;
   const sodium = item.sodium_mg;
   const potassium = item.potassium_mg;
   const calcium = item.calcium_mg;
   const iron = item.iron_mg;
+  const zinc = item.zinc_mg;
+  const magnesium = item.magnesium_mg;
+  const folate = item.folate_mcg;
+  const vitaminA = item.vita_rae_mcg;
+  const vitaminC = item.vitc_mg;
+  const vitaminD = item.vitd_mcg;
+  const vitaminB12 = item.vitb12_mcg;
+  const iodine = item.iodine_mcg;
 
   const macros = [];
   if (kcal != null) macros.push(`${kcal} kcal`);
@@ -1947,6 +1958,14 @@ function formatFoodResult(item) {
   if (potassium != null) micros.push(`Potassium ${potassium}mg`);
   if (calcium != null) micros.push(`Calcium ${calcium}mg`);
   if (iron != null) micros.push(`Iron ${iron}mg`);
+  if (zinc != null) micros.push(`Zinc ${zinc}mg`);
+  if (magnesium != null) micros.push(`Magnesium ${magnesium}mg`);
+  if (folate != null) micros.push(`Folate ${folate}mcg`);
+  if (vitaminA != null) micros.push(`Vitamin A ${vitaminA}mcg`);
+  if (vitaminC != null) micros.push(`Vitamin C ${vitaminC}mg`);
+  if (vitaminD != null) micros.push(`Vitamin D ${vitaminD}mcg`);
+  if (vitaminB12 != null) micros.push(`Vitamin B12 ${vitaminB12}mcg`);
+  if (iodine != null) micros.push(`Iodine ${iodine}mcg`);
 
   const lines = [`*${name}*${brand}${measureText}`];
   if (macros.length) lines.push(macros.join(", "));
