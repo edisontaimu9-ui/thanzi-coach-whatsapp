@@ -279,7 +279,7 @@ async function handleIncomingMessage(request, env, ctx) {
     ctx.waitUntil(recordError(from, err, env));
     const reply = isSubrequestLimitError(err)
       ? SUBREQUEST_LIMIT_MESSAGE
-      : "Pepani, pali vuto pakadali pano. Yesaninso pambuyo pa mphindi zochepa. 🙏";
+      : "Sorry, something went wrong. Please try again in a few minutes. 🙏";
     await sendWhatsAppReply(from, reply, env).catch(() => {}); // best-effort; don't crash the webhook ack
   }
 
@@ -1195,7 +1195,7 @@ async function handleImageMessage(image, from, env, ctx) {
   if (!mediaId) {
     await sendWhatsAppReply(
       from,
-      "Ndilandire chithunzi, koma sindinathe kuchiwerenga. Yesaninso. 🙏",
+      "I received an image, but couldn't read it. Please try again. 🙏",
       env
     );
     return;
@@ -1203,7 +1203,7 @@ async function handleImageMessage(image, from, env, ctx) {
 
   await sendWhatsAppReply(
     from,
-    "Ndikuwerenga chithunzi... mudikire pang'ono. 📷",
+    "Reading your image... one moment. 📷",
     env
   ).catch(() => {}); // best-effort progress ping; not fatal if it fails
 
@@ -1225,7 +1225,7 @@ async function handleImageMessage(image, from, env, ctx) {
     await sendWhatsAppReply(
       from,
       found?.text ||
-        `Ndawerenga barcode ${barcode}, koma sindinapeze mankhwala ake m'databasi. 🙏`,
+        `I read barcode ${barcode}, but couldn't find it in the database. 🙏`,
       env
     );
     if (found) ctx.waitUntil(saveLastFoodContext(from, toFoodContext(found.item), env));
@@ -1248,7 +1248,7 @@ async function handleAudioMessage(audio, from, env, ctx) {
   if (!mediaId) {
     await sendWhatsAppReply(
       from,
-      "Ndilandire mawu anu, koma sindinathe kuwatsegula. Yesaninso. 🙏",
+      "I received your voice note, but couldn't open it. Please try again. 🙏",
       env
     );
     return;
@@ -1256,7 +1256,7 @@ async function handleAudioMessage(audio, from, env, ctx) {
 
   await sendWhatsAppReply(
     from,
-    "Ndikumvetsera mawu anu... mudikire pang'ono. 🎙️",
+    "Listening to your voice note... one moment. 🎙️",
     env
   ).catch(() => {}); // best-effort progress ping; not fatal if it fails
 
@@ -1266,7 +1266,7 @@ async function handleAudioMessage(audio, from, env, ctx) {
   if (!transcript) {
     await sendWhatsAppReply(
       from,
-      "Pepani, sindinamve bwino mawu anuwo. Yesaninso, kapena lembani funso lanu. 🙏",
+      "Sorry, I couldn't hear that clearly. Please try again, or type your question instead. 🙏",
       env
     );
     return;
@@ -1406,40 +1406,49 @@ async function decodeBarcodeLocally(imageBytes) {
 // barcode is visible in the image.
 async function readBarcodeFromImage(base64, mimeType, env) {
   const dataUrl = `data:${mimeType};base64,${base64}`;
-  const res = await fetchWithRetry(fetch, "https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${env.GROQ_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: "qwen/qwen3.6-27b",
-      messages: [
-        {
-          role: "user",
-          content: [
-            {
-              type: "text",
-              text: "If this image shows a barcode, reply with ONLY the numeric digits printed under/beside it (no spaces, no other text). If there is no barcode visible in the image, reply with exactly: NONE",
-            },
-            { type: "image_url", image_url: { url: dataUrl } },
-          ],
-        },
-      ],
-      temperature: 0,
-      max_completion_tokens: 30,
-    }),
-  });
+  try {
+    const res = await fetchWithRetry(fetch, "https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${env.GROQ_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "qwen/qwen3.6-27b",
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: "If this image shows a barcode, reply with ONLY the numeric digits printed under/beside it (no spaces, no other text). If there is no barcode visible in the image, reply with exactly: NONE",
+              },
+              { type: "image_url", image_url: { url: dataUrl } },
+            ],
+          },
+        ],
+        temperature: 0,
+        max_completion_tokens: 30,
+      }),
+    });
 
-  if (!res.ok) {
-    console.error("Groq barcode read error:", res.status, await res.text());
+    if (!res.ok) {
+      console.error("Groq barcode read error:", res.status, await res.text());
+      return null; // fail open -> falls back to nutrition-label OCR
+    }
+
+    const body = await res.json();
+    const raw = body?.choices?.[0]?.message?.content?.trim() || "";
+    const digits = raw.replace(/\D/g, "");
+    return digits.length >= 8 && digits.length <= 14 ? digits : null;
+  } catch (err) {
+    // fetchWithRetry's own retry can still throw (e.g. two consecutive
+    // network failures/timeouts) — that's not caught anywhere upstream of
+    // this call, so without this it crashes the whole image handler
+    // instead of falling open to the nutrition-label OCR path below.
+    console.error("Groq barcode read failed:", err);
     return null; // fail open -> falls back to nutrition-label OCR
   }
-
-  const body = await res.json();
-  const raw = body?.choices?.[0]?.message?.content?.trim() || "";
-  const digits = raw.replace(/\D/g, "");
-  return digits.length >= 8 && digits.length <= 14 ? digits : null;
 }
 
 // Formats calculateEnergyRequirement's result (see ./energy.js) for a
@@ -1821,7 +1830,7 @@ async function scanPackagedLabel(base64, mimeType, env) {
 
   if (res.status === 422) {
     return {
-      text: "Sindinathe kuwerenga zambiri pa chithunzichi. Chonde jambulani bwino chizindikiro cha zakudya (nutrition label) ndikutumizanso. 🙏",
+      text: "I couldn't read enough from this image. Please take a clearer photo of the nutrition label and send it again. 🙏",
       context: null,
     };
   }
@@ -1840,7 +1849,7 @@ async function scanPackagedLabel(base64, mimeType, env) {
     return { text: SUBREQUEST_LIMIT_MESSAGE, context: null };
   }
   return {
-    text: result || "Ndawerenga chithunzicho, koma sindinapeze zambiri zokwanira.",
+    text: result || "I read the image, but couldn't find enough information.",
     context: toFoodContext(body?.data),
   };
 }
@@ -2141,7 +2150,7 @@ async function askChakudya(query, fromNumber, env) {
 
   const body = await res.json();
   const answer = normalizeCitationBrackets(
-    body?.data?.answer || "Pepani, sindinapeze yankho pa funso limeneli."
+    body?.data?.answer || "Sorry, I couldn't find an answer to that question."
   );
 
   if (looksLikeLeakedProviderError(answer)) {
