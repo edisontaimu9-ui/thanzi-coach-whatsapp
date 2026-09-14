@@ -1858,6 +1858,19 @@ async function lookupBarcode(barcode, env) {
   const res = await chakudyaFetch(env, 
     `https://chakudya-api/foods/lookup?barcode=${encodeURIComponent(barcode)}`
   );
+  // A 404 here just means "this barcode isn't in Chakudya's database" — an
+  // everyday, expected outcome (most packaged Malawian products aren't
+  // catalogued yet), not a failure. Treating it as a thrown error was the
+  // actual bug: it sent every not-yet-catalogued barcode straight to the
+  // generic "something went wrong" reply instead of the friendly
+  // "couldn't find it in the database" message the caller already has
+  // below — which is exactly what happened scanning the "More!" yoghurt
+  // drink barcode. Only a real provider failure should still throw.
+  if (res.status === 404) return null;
+  if (isProviderUnavailable(res.status)) {
+    console.error("Barcode lookup provider unavailable:", res.status, await res.text());
+    return null;
+  }
   if (!res.ok) {
     throw new Error(`Barcode lookup error: ${res.status} ${await res.text()}`);
   }
