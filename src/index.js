@@ -1213,22 +1213,31 @@ async function handleImageMessage(image, from, env, ctx) {
   // ZXing decode runs first — free, instant, no image data leaves
   // Cloudflare — and only if that finds nothing do we fall back to the
   // Groq vision reader, which is slower/costlier but more forgiving of
-  // blur, glare, or an off-angle shot. Only if BOTH find no barcode do we
-  // fall back further to Chakudya's nutrition-label OCR — this way one
-  // photo handles either case (barcode or label) automatically.
+  // blur, glare, or an off-angle shot.
   let barcode = await decodeBarcodeLocally(bytes);
   if (!barcode) {
     barcode = await readBarcodeFromImage(base64, mimeType, env);
   }
+
   if (barcode) {
     const found = await lookupBarcode(barcode, env);
-    await sendWhatsAppReply(
-      from,
-      found?.text ||
-        `I read barcode ${barcode}, but couldn't find it in the database. 🙏`,
-      env
-    );
-    if (found) ctx.waitUntil(saveLastFoodContext(from, toFoodContext(found.item), env));
+    if (found) {
+      await sendWhatsAppReply(from, found.text, env);
+      ctx.waitUntil(saveLastFoodContext(from, toFoodContext(found.item), env));
+      return;
+    }
+
+    // Barcode read fine, but this product isn't in Chakudya yet — this is
+    // the actual "submit a new product" path: run the same nutrition-label
+    // OCR pipeline used below for photos with no barcode, passing along
+    // the barcode we already decoded so the submission is correctly keyed
+    // to it. /packaged/scan inserts it into the review queue as
+    // status="pending" — this is what lets ANY user grow the database via
+    // WhatsApp, not just a one-off manual /packaged/submit call.
+    const result = await scanPackagedLabel(base64, mimeType, env, barcode);
+    const prefix = `I read barcode ${barcode}, but it's not in the database yet. `;
+    await sendWhatsAppReply(from, prefix + result.text, env);
+    if (result.context) ctx.waitUntil(saveLastFoodContext(from, result.context, env));
     return;
   }
 
@@ -1820,12 +1829,18 @@ function isProviderUnavailable(status) {
   return status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
 }
 
-async function scanPackagedLabel(base64, mimeType, env) {
+async function scanPackagedLabel(base64, mimeType, env, barcode) {
   const dataUrl = `data:${mimeType};base64,${base64}`;
+  const payload = { images: [dataUrl] };
+  // Pass along a barcode we already decoded locally/via Groq so
+  // /packaged/scan doesn't have to re-derive it from the photo — and so
+  // the submitted row is correctly keyed to it even if the barcode itself
+  // isn't clearly visible in this particular shot of the label.
+  if (barcode) payload.barcode = barcode;
   const res = await chakudyaFetch(env, "https://chakudya-api/packaged/scan", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ images: [dataUrl] }),
+    body: JSON.stringify(payload),
   });
 
   if (res.status === 422) {
@@ -1848,8 +1863,14 @@ async function scanPackagedLabel(base64, mimeType, env) {
     console.error("Packaged scan leaked a provider error:", result);
     return { text: SUBREQUEST_LIMIT_MESSAGE, context: null };
   }
+  // A scan always lands as status="pending" (see handlePackagedScan) — it's
+  // added to the review queue, not live yet. Say so explicitly so the user
+  // doesn't think this barcode is now instantly searchable by anyone.
+  const submissionNote = body?.message ? `\n\n📋 ${body.message}` : "";
   return {
-    text: result || "I read the image, but couldn't find enough information.",
+    text: result
+      ? `${result}${submissionNote}`
+      : "I read the image, but couldn't find enough information.",
     context: toFoodContext(body?.data),
   };
 }
