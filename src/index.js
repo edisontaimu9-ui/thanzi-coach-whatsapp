@@ -54,6 +54,14 @@
  *      LLM in this path. See ./under5Screening.js for the full design
  *      rationale and required setup (CHAKUDYA_MCP service binding +
  *      CHAKUDYA_MCP_AUTH_TOKEN secret, listed below too).
+ *  14. "screen a pregnant woman for malnutrition" / "postpartum screening" ->
+ *      a multi-turn maternal malnutrition screening intake (MUAC, country-
+ *      specific MUAC cutoff, oedema, confirmed >10% weight loss), calling
+ *      the Chakudya MCP server's pregnant_postpartum_integrated_screen
+ *      tool once complete. Same deterministic-question/deterministic-call/
+ *      Groq-narrates-only-with-hardcoded-action-appended architecture as
+ *      #13 above. See ./pregnantPostpartumScreening.js. No new secret or
+ *      binding needed — reuses CHAKUDYA_MCP / CHAKUDYA_MCP_AUTH_TOKEN.
  *
  * Required secrets (set with `wrangler secret put <NAME>` — never hardcode these):
  *   WHATSAPP_TOKEN         - Meta permanent/system-user access token
@@ -113,6 +121,7 @@ import {
 } from "./detectors.js";
 import { calculateEnergyRequirement } from "./energy.js";
 import { handleUnder5ScreeningFlow } from "./under5Screening.js";
+import { handlePregnantPostpartumScreeningFlow } from "./pregnantPostpartumScreening.js";
 
 // Default per-request timeout for outbound HTTP calls (Chakudya, Groq,
 // WhatsApp Cloud API). Without this, a hung upstream stalls the request
@@ -321,6 +330,16 @@ async function handleTextMessage(userText, from, env, ctx) {
   const screeningReply = await handleUnder5ScreeningFlow(userText, from, env);
   if (screeningReply !== null) {
     await sendWhatsAppReply(from, screeningReply, env);
+    return;
+  }
+
+  // Pregnant/postpartum malnutrition screening: same reasoning as above,
+  // see ./pregnantPostpartumScreening.js. Uses a distinct trigger (requires
+  // pregnant/postpartum/antenatal wording, not child/baby/infant) and a
+  // distinct session kind, so the two flows never collide.
+  const pregnantScreeningReply = await handlePregnantPostpartumScreeningFlow(userText, from, env);
+  if (pregnantScreeningReply !== null) {
+    await sendWhatsAppReply(from, pregnantScreeningReply, env);
     return;
   }
 
