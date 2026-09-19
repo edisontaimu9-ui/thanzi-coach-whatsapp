@@ -42,3 +42,17 @@ database_id = "b9170a96-d6ed-4b26-b137-06cb073ea01a"
 [[services]]
 binding = "CHAKUDYA_API"
 service = "chakudya-api"
+
+# Service Binding to the Chakudya MCP server (a separate Worker from
+# chakudya-api — see chakudya-mcp-server-cloudflare's wrangler.jsonc),
+# used by src/under5Screening.js to call the under5_integrated_screen tool.
+# "service" must exactly match that Worker's deployed name.
+# That server requires a bearer token on every /mcp request (see its
+# src/server/security.ts) — set CHAKUDYA_MCP_AUTH_TOKEN below to the SAME
+# value as its own MCP_AUTH_TOKEN secret, via:
+#   npx wrangler secret put CHAKUDYA_MCP_AUTH_TOKEN
+# Without this secret, the screening flow will start the conversation but
+# fail with an auth error at the final step.
+[[services]]
+binding = "CHAKUDYA_MCP"
+service = "chakudya-mcp-server-cloudflare"

@@ -46,6 +46,14 @@
  *      individual /rag/ask call (still single-topic, still safe) instead of
  *      being dropped. See detectMultiFoodList/lookupFoodsViaBatch/
  *      resolveUnknownFoodsViaRag/formatMultiFoodResults.
+ *  13. "screen a child for malnutrition" / "check muac for my baby" ->
+ *      a multi-turn under-5 malnutrition screening intake (sex, age,
+ *      weight, height, MUAC, oedema, optional STRONGkids), calling the
+ *      Chakudya MCP server's under5_integrated_screen tool once complete.
+ *      Deterministic questions and deterministic result formatting — no
+ *      LLM in this path. See ./under5Screening.js for the full design
+ *      rationale and required setup (CHAKUDYA_MCP service binding +
+ *      CHAKUDYA_MCP_AUTH_TOKEN secret, listed below too).
  *
  * Required secrets (set with `wrangler secret put <NAME>` — never hardcode these):
  *   WHATSAPP_TOKEN         - Meta permanent/system-user access token
@@ -57,6 +65,12 @@
  *   ADMIN_PHONE             - optional; your own WhatsApp number for the daily
  *                            summary cron job (see wrangler.toml [triggers]).
  *                            No-ops if unset.
+ *   CHAKUDYA_MCP_AUTH_TOKEN - REQUIRED for the under-5 screening flow to work.
+ *                            Must match chakudya-mcp-server-cloudflare's own
+ *                            MCP_AUTH_TOKEN secret exactly (same value, both
+ *                            repos). Without it, "screen a child" starts the
+ *                            conversation but fails with an auth error at
+ *                            the final step. See ./under5Screening.js.
  *
  * DB is a D1 binding (see wrangler.toml [[d1_databases]]) tracking unique
  * WhatsApp users and message events for analytics. GET /stats?token=...
@@ -98,6 +112,7 @@ import {
   detectMealPlanEdit,
 } from "./detectors.js";
 import { calculateEnergyRequirement } from "./energy.js";
+import { handleUnder5ScreeningFlow } from "./under5Screening.js";
 
 // Default per-request timeout for outbound HTTP calls (Chakudya, Groq,
 // WhatsApp Cloud API). Without this, a hung upstream stalls the request
@@ -298,6 +313,17 @@ async function handleIncomingMessage(request, env, ctx) {
 // in ./detectors.js.
 
 async function handleTextMessage(userText, from, env, ctx) {
+  // Under-5 malnutrition screening: multi-turn structured intake (see
+  // ./under5Screening.js). Checked first, both to continue an in-progress
+  // session (a bare "12" or "yes" mid-flow must never be swallowed by
+  // food/greeting detection below) and so the trigger phrase for starting
+  // a new session wins over every other detector.
+  const screeningReply = await handleUnder5ScreeningFlow(userText, from, env);
+  if (screeningReply !== null) {
+    await sendWhatsAppReply(from, screeningReply, env);
+    return;
+  }
+
   const greetingLang = detectGreetingLanguage(userText);
   if (greetingLang) {
     await sendPromptList(from, greetingLang, env);
