@@ -20,8 +20,8 @@
  *   - explainUnder5ScreeningResult() optionally asks Groq (this repo's
  *     existing LLM provider — see GROQ_API_KEY, already used for barcode
  *     vision and voice transcription elsewhere in index.js) to narrate the
- *     SAME already-computed JSON more warmly / with light Chichewa, for
- *     the explanatory portion only. The recommended action and the
+ *     SAME already-computed JSON more warmly, for the explanatory portion
+ *     only (English only — see the system prompt). The recommended action and the
  *     disclaimer are then appended AFTER the model's text, verbatim,
  *     every time — so even if the model paraphrases loosely, drops
  *     something, or the API call fails outright, the actual clinical
@@ -529,8 +529,8 @@ function toWhatsAppFormatting(text) {
 }
 
 /**
- * Narrates an already-computed screening result more warmly (optionally
- * with light Chichewa), via Groq. The recommended action and disclaimer
+ * Narrates an already-computed screening result more warmly, via Groq
+ * (English only — see the system prompt). The recommended action and disclaimer
  * are appended verbatim afterward regardless of what the model produced —
  * see the design-decision comment at the top of this file for why. Falls
  * back to the plain deterministic formatting (still complete and correct)
@@ -546,15 +546,15 @@ export async function explainUnder5ScreeningResult(result, env) {
     "health worker over WhatsApp. You are NOT deciding anything — every number, classification, and " +
     "recommendation has already been computed by deterministic clinical rules (WHO growth standards, " +
     "NACS, and published paediatric screening tools). Your only job is to explain the anthropometry " +
-    "and classification findings warmly and plainly, in 3-6 short sentences, optionally blending in a " +
-    "few natural Chichewa words/phrases the way a Malawian health worker might speak. Rules: " +
+    "and classification findings warmly and plainly, in 3-6 short sentences, in English only. Rules: " +
     "1) Never change, round differently, soften, or omit any number or classification given. " +
     "2) Never add a clinical recommendation, treatment detail, or referral instruction of your own — " +
     "the recommended action will be appended separately after your text, so don't restate or " +
     "pre-empt it. 3) Never claim certainty data doesn't support — if something is marked unavailable " +
     "or not administered, say so plainly rather than guessing why. 4) Use WhatsApp-style formatting " +
     "only (*bold*, plain bullets with •) — no markdown headers, no tables, no code blocks. " +
-    "5) Output ONLY the explanation text, nothing else (no preamble like \"Here's an explanation\").";
+    "5) Write in English only — do not use Chichewa or any other language, even a single word. " +
+    "6) Output ONLY the explanation text, nothing else (no preamble like \"Here's an explanation\").";
 
   const userPrompt = `Screening result JSON:\n${JSON.stringify(result)}`;
 
