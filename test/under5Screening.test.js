@@ -15,6 +15,7 @@ import {
   applyReply,
   formatUnder5ScreeningResult,
   explainUnder5ScreeningResult,
+  toWhatsAppFormatting,
 } from "../src/under5Screening.js";
 
 describe("detectUnder5ScreeningTrigger", () => {
@@ -159,6 +160,24 @@ describe("formatUnder5ScreeningResult", () => {
   });
 });
 
+describe("toWhatsAppFormatting", () => {
+  test("converts markdown **bold** to WhatsApp *bold*", () => {
+    assert.equal(toWhatsAppFormatting("Weight-for-age z-score of **-3.67**"), "Weight-for-age z-score of *-3.67*");
+  });
+
+  test("converts markdown __italic__ to WhatsApp _italic_", () => {
+    assert.equal(toWhatsAppFormatting("__note__"), "_note_");
+  });
+
+  test("strips stray markdown headers", () => {
+    assert.equal(toWhatsAppFormatting("# Summary\nSome text"), "Summary\nSome text");
+  });
+
+  test("leaves already-correct WhatsApp single-asterisk bold untouched", () => {
+    assert.equal(toWhatsAppFormatting("*already bold*"), "*already bold*");
+  });
+});
+
 describe("explainUnder5ScreeningResult", () => {
   const fakeResult = {
     child: { sex: "male", age_months: 20 },
@@ -181,6 +200,22 @@ describe("explainUnder5ScreeningResult", () => {
   test("falls back to the deterministic format when no GROQ_API_KEY is set", async () => {
     const text = await explainUnder5ScreeningResult(fakeResult, {});
     assert.equal(text, formatUnder5ScreeningResult(fakeResult));
+  });
+
+  test("normalizes the model's markdown **bold** into WhatsApp *bold* in the final message", async () => {
+    const originalFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = async () =>
+        new Response(
+          JSON.stringify({ choices: [{ message: { content: "Weight-for-age z-score is **-3.67**, severely underweight." } }] }),
+          { status: 200 }
+        );
+      const text = await explainUnder5ScreeningResult(fakeResult, { GROQ_API_KEY: "test-key" });
+      assert.match(text, /\*-3\.67\*/);
+      assert.doesNotMatch(text, /\*\*/);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   test("uses the model's text but ALWAYS appends the real recommended action + disclaimer verbatim", async () => {

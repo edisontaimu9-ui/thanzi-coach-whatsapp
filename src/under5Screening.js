@@ -125,7 +125,7 @@ export function detectUnder5ScreeningTrigger(text) {
 
 // Exported for unit testing (see test/under5Screening.test.js) — these are
 // pure functions with no D1/network dependency.
-export { parseSex, parseAge, parseNumber, parseMuacMm, parseYesNo, parseMeasurementMethod, parseContext, nextStep, applyReply, formatUnder5ScreeningResult };
+export { parseSex, parseAge, parseNumber, parseMuacMm, parseYesNo, parseMeasurementMethod, parseContext, nextStep, applyReply, formatUnder5ScreeningResult, toWhatsAppFormatting };
 
 // ── Field parsers ──
 
@@ -514,6 +514,21 @@ function recommendedActionBlock(result) {
 }
 
 /**
+ * Normalizes markdown-ish text a model might produce into WhatsApp's own
+ * formatting syntax, regardless of how well the prompt's formatting
+ * instruction was followed. WhatsApp bold is single asterisks (*bold*);
+ * models habitually reach for markdown's **bold** even when told not to.
+ * Applied ONLY to Groq's generated text — the deterministic parts of the
+ * message already use the correct syntax.
+ */
+function toWhatsAppFormatting(text) {
+  return text
+    .replace(/\*\*(.+?)\*\*/g, "*$1*") // **bold** -> *bold*
+    .replace(/__(.+?)__/g, "_$1_") // __italic__ -> _italic_
+    .replace(/^#{1,6}\s*/gm, ""); // strip stray markdown headers
+}
+
+/**
  * Narrates an already-computed screening result more warmly (optionally
  * with light Chichewa), via Groq. The recommended action and disclaimer
  * are appended verbatim afterward regardless of what the model produced —
@@ -576,11 +591,12 @@ export async function explainUnder5ScreeningResult(result, env) {
     }
 
     const body = await res.json();
-    const text = body?.choices?.[0]?.message?.content?.trim();
-    if (!text) {
+    const rawText = body?.choices?.[0]?.message?.content?.trim();
+    if (!rawText) {
       console.error("Groq under5-explain: empty content");
       return deterministic;
     }
+    const text = toWhatsAppFormatting(rawText);
 
     return [text, "", recommendedActionBlock(result)].join("\n");
   } catch (err) {
