@@ -137,6 +137,13 @@ import { handlePregnantPostpartumScreeningFlow, detectPregnantPostpartumScreenin
 import { handleSchoolAgeScreeningFlow, detectSchoolAgeScreeningTrigger } from "./schoolAgeScreening.js";
 import { handleAdultScreeningFlow, detectAdultScreeningTrigger } from "./adultScreening.js";
 import { clearAllScreeningSessions } from "./screeningShared.js";
+import {
+  SCREENING_MENU_ROW_ID,
+  SCREENING_MENU_BODY,
+  SCREENING_MENU_BUTTON,
+  screeningMenuSections,
+  detectScreeningMenuRequest,
+} from "./screeningMenu.js";
 
 // Default per-request timeout for outbound HTTP calls (Chakudya, Groq,
 // WhatsApp Cloud API). Without this, a hung upstream stalls the request
@@ -350,7 +357,8 @@ async function handleTextMessage(userText, from, env, ctx) {
     detectSchoolAgeScreeningTrigger(userText) ||
     detectUnder5ScreeningTrigger(userText) ||
     detectPregnantPostpartumScreeningTrigger(userText) ||
-    detectAdultScreeningTrigger(userText)
+    detectAdultScreeningTrigger(userText) ||
+    detectScreeningMenuRequest(userText)
   ) {
     await clearAllScreeningSessions(from, env);
   }
@@ -384,6 +392,17 @@ async function handleTextMessage(userText, from, env, ctx) {
   const adultScreeningReply = await handleAdultScreeningFlow(userText, from, env);
   if (adultScreeningReply !== null) {
     await sendWhatsAppReply(from, adultScreeningReply, env);
+    return;
+  }
+
+  // "malnutrition screening" with no population named (typed, or tapped from the greeting list's
+  // "Malnutrition screening" row): show the tappable who-to-screen menu. See ./screeningMenu.js.
+  if (detectScreeningMenuRequest(userText)) {
+    await sendWhatsAppInteractiveList(
+      from,
+      { body: SCREENING_MENU_BODY, buttonText: SCREENING_MENU_BUTTON, sections: screeningMenuSections() },
+      env
+    );
     return;
   }
 
@@ -2547,6 +2566,7 @@ const PROMPT_EXAMPLES_EN = [
   { id: "How much iron do I need?", title: "Daily Nutrient Needs" },
   { id: "Quinoa", title: "Look Up Any Food" },
   { id: "quinoa 200g", title: "Nutrition by Weight" },
+  { id: SCREENING_MENU_ROW_ID, title: "Malnutrition Screening" },
 ];
 
 const PROMPT_EXAMPLES_NY = [
@@ -2557,6 +2577,7 @@ const PROMPT_EXAMPLES_NY = [
   { id: "How much iron do I need?", title: "Iron Yofunika Tsiku" },
   { id: "Quinoa", title: "Funsani Chakudya" },
   { id: "quinoa 200g", title: "Kulemera kwa Chakudya" },
+  { id: SCREENING_MENU_ROW_ID, title: "Kuyeza Malnutrition" },
 ];
 
 async function sendPromptList(to, lang, env) {

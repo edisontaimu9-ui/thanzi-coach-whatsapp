@@ -59,6 +59,15 @@ under-5 flow — nothing new to configure):
 | "screen a pregnant woman" | pregnant / postpartum | `pregnant_postpartum_integrated_screen` |
 | "screen an adult" / "check muac for an elderly patient" | adults 18+ | `adult_integrated_screen` |
 
+Sample prompts (also reachable by tapping **Malnutrition Screening** in the
+greeting list, which opens a who-to-screen menu — typing "malnutrition
+screening" or "screen for malnutrition" opens the same menu):
+
+- Under 5: "Screen a child for malnutrition", "check muac for my baby"
+- 5–17: "Screen a school child for malnutrition", "Screen an adolescent for malnutrition", "check BMI for a 9 year old"
+- Adults: "Screen an adult for malnutrition", "check muac for an elderly patient", "screen a man for malnutrition"
+- Pregnant / postpartum: "Screen a pregnant woman for malnutrition", "postpartum malnutrition screening"
+
 The flows hand people to each other from what they are told: "screen a child"
 moves to the 5–17 flow when the age is 5 or more, the 5–17 flow moves to the
 adult flow at 18, and a girl/woman who is pregnant or recently gave birth is
