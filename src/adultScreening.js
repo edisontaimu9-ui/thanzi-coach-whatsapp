@@ -24,6 +24,16 @@
  * available by calling adult_integrated_screen directly. Weight is never
  * estimated (the published equations are too coarse for a BMI).
  *
+ * WEIGHT ESTIMATE: if weight is skipped (person can't be weighed) and MUAC was given, the
+ * flow offers — as an explicit yes/no — to ESTIMATE weight, reusing the step machine in
+ * ./weightEstimate.js (arm + calf for 65+; knee height + race, which is asked, for ages up
+ * to 80). The raw measurements go to the MCP tool with estimate_weight_if_missing = true;
+ * the MCP tool does the estimating and returns BMI as a labelled estimate with a range and
+ * an "uncertain" flag when the error straddles a NACS cut-off. The standard errors are large
+ * (about 4-5 kg for 65+, 7-14.5 kg for the race-specific set), so the reply says so and the
+ * estimate only ever affects BMI (and MUST) — never the MUAC, oedema or weight-loss findings.
+ * If height is also missing after that, the ulna question is asked at the end of this block.
+ *
  * ROUTING: a woman under 50 is asked whether she is pregnant or recently
  * gave birth — "yes" hands over to the maternal flow. Under-18 ages are
  * turned away with a pointer to "screen a school child" / "screen a child".
@@ -56,6 +66,13 @@ import {
   NARRATION_RULES,
 } from "./screeningShared.js";
 import { beginPregnantPostpartumScreening } from "./pregnantPostpartumScreening.js";
+import {
+  applyReply as applyWeightEstimateReply,
+  nextStep as nextWeightEstimateStep,
+  promptFor as weightEstimatePrompt,
+  plannedTools as weightEstimatePlannedTools,
+  estimationPossibleForAge,
+} from "./weightEstimate.js";
 
 const SESSION_KIND = "adult_screening";
 const ADULT_AGE_MONTHS = 216; // 18 years
@@ -72,6 +89,7 @@ export function detectAdultScreeningTrigger(text) {
 // ── Prompts ──
 
 export function promptFor(step) {
+  if (step.startsWith("we_") && step !== "we_gate") return weightEstimatePrompt(step.slice(3));
   switch (step) {
     case "sex":
       return "Let's screen an adult for malnutrition risk 🩺\n\nIs the person a man or a woman? (Reply *man* or *woman*. Reply *cancel* anytime to stop.)";
@@ -80,10 +98,13 @@ export function promptFor(step) {
     case "pregnant":
       return "Is she pregnant, or has she recently given birth? Reply *yes* or *no*.";
     case "weight":
-      return "What is the person's weight in kilograms? (e.g. *58.5*). Reply *skip* if not available.";
+      return "What is the person's weight in kilograms? (e.g. *58.5*). Reply *skip* if it can't be measured — I can then offer to estimate it.";
     case "height":
       return "What is the person's standing height in centimetres? (e.g. *165*). Reply *skip* if not available.";
+    case "we_gate":
+      return "You skipped weight. If the person can't be weighed I can *estimate* it from body measurements (arm and calf, or knee height). It is only an estimate — the typical error is several kg, more for younger adults — so BMI will be shown as a range and flagged as uncertain. Estimate weight? Reply *yes* or *no*.";
     case "ulna":
+    case "ulna_late":
       return "Can't stand for a height measurement? You can estimate it from ULNA length instead: with the arm bent and the palm across the chest, measure the LEFT forearm from the point of the elbow to the midpoint of the bony bump of the wrist. Reply in cm (e.g. *26.5*, between 18.5 and 32), or *skip*.";
     case "muac":
       return "What is the person's MUAC (mid-upper arm circumference), if measured? Reply in mm (e.g. *230*) or cm (e.g. *23cm*). Reply *skip* if not available.";
@@ -121,21 +142,44 @@ export function nextStep(step, data) {
     case "ulna":
       return "muac";
     case "muac":
+      // Weight was skipped but arm circumference given: offer to estimate weight (only where an equation can apply at this age)
+      return data.weight_kg === undefined && data.muac_mm !== undefined && estimationPossibleForAge(estimateAgeMonths(data) / 12) ? "we_gate" : "edema";
+    case "we_gate":
+      return data.estimateWeight ? `we_${nextWeightEstimateStep("muac", data)}` : "edema";
+    case "ulna_late":
       return "edema";
     case "edema":
       return "weight_loss";
     case "weight_loss":
       return "context";
     case "context":
-      // MUST needs a BMI, so only offer it when weight AND a height (measured, or estimable from ulna length) were given
-      return data.weight_kg !== undefined && (data.height_cm !== undefined || data.ulna_length_cm !== undefined) ? "must_gate" : "finish";
+      // MUST needs a BMI, so only offer it when a weight (measured or estimated) AND a height (measured or estimated) can be had
+      return bmiPossible(data) ? "must_gate" : "finish";
     case "must_gate":
       return data.wantsMust ? "must_wl" : "finish";
     case "must_wl":
       return "must_acute";
     default:
+      if (step.startsWith("we_")) {
+        const inner = nextWeightEstimateStep(step.slice(3), data);
+        return inner === "finish" ? afterWeightEstimate(data) : `we_${inner}`;
+      }
       return "finish";
   }
+}
+
+/** Once the weight-estimate questions are done: ask the ulna question if a BMI still lacks any way to get a height. */
+function afterWeightEstimate(data) {
+  const canEstimate = weightEstimatePlannedTools(data).length > 0;
+  const heightDerivable = data.height_cm !== undefined || data.ulna_length_cm !== undefined || (data.kh_cm !== undefined && data.race !== undefined);
+  return canEstimate && !heightDerivable ? "ulna_late" : "edema";
+}
+
+/** True when the collected answers can yield a BMI (measured or estimated weight, and a measured or estimable height). */
+function bmiPossible(data) {
+  const weightOk = data.weight_kg !== undefined || (data.estimateWeight === true && weightEstimatePlannedTools(data).length > 0);
+  const heightOk = data.height_cm !== undefined || data.ulna_length_cm !== undefined || (data.kh_cm !== undefined && data.race !== undefined);
+  return weightOk && heightOk;
 }
 
 function parseWeightLossBand(text) {
@@ -151,6 +195,16 @@ function parseWeightLossBand(text) {
  *   { error } | { advance: true } | { finish: true } | { handoff: "pregnant" | "underage" }
  */
 export function applyReply(step, text, data) {
+  // Weight-estimate questions are answered by the shared step machine. Its "done" (finish estimating) must not end the whole intake.
+  if (step.startsWith("we_") && step !== "we_gate") {
+    const r = applyWeightEstimateReply(step.slice(3), text, data);
+    if ("finish" in r) {
+      data.wantsSkinfold = false;
+      return { advance: true };
+    }
+    return r;
+  }
+
   if (isSkip(text) && !["sex", "age", "pregnant", "must_wl", "must_acute"].includes(step)) {
     return { advance: true }; // skip leaves the field unset — never invents a value
   }
@@ -192,7 +246,15 @@ export function applyReply(step, text, data) {
       data.height_cm = v;
       return { advance: true };
     }
-    case "ulna": {
+    case "we_gate": {
+      const v = parseYesNo(text);
+      if (!v) return { error: "Please reply *yes* or *no*." };
+      data.estimateWeight = v === "yes";
+      if (data.estimateWeight) data.muac_cm = data.muac_mm / 10; // the estimation equations take cm
+      return { advance: true };
+    }
+    case "ulna":
+    case "ulna_late": {
       const v = parseNumber(text);
       if (v === null) return { error: "Please reply with the ulna length in cm (e.g. *26.5*), or *skip*." };
       if (v < 18.5 || v > 32) {
@@ -263,6 +325,13 @@ export function buildScreenArgs(data) {
     confirmed_weight_loss_over_10_percent: data.confirmed_weight_loss_over_10_percent,
     measurement_context: data.measurement_context,
   };
+  if (data.estimateWeight) {
+    args.estimate_weight_if_missing = true;
+    args.calf_circumference_cm = data.calf_cm;
+    args.subscapular_skinfold_mm = data.ssf_mm;
+    args.knee_height_cm = data.kh_cm;
+    args.race = data.race;
+  }
   if (data.wantsMust && data.must_weight_loss_band !== undefined && data.must_acute !== undefined) {
     args.must = {
       weight_loss_band: data.must_weight_loss_band,
@@ -277,12 +346,20 @@ export function buildScreenArgs(data) {
 export function formatAdultScreeningResult(result) {
   const lines = [];
   lines.push("*Adult Malnutrition Screening Result*");
-  const bmi = result.measurements.bmi !== null ? `, BMI ${result.measurements.bmi}` : "";
+  const range = result.measurements.bmi_range_from_estimate_error;
+  const bmi =
+    result.measurements.bmi !== null
+      ? `, BMI ${result.measurements.bmi}${range ? ` (could be ${range.low}–${range.high})` : ""}`
+      : "";
   lines.push(`Adult: ${result.person.age_years} years, ${result.person.sex === "female" ? "woman" : "man"}${bmi}`);
   const heightSource = result.measurements.height_source;
   if (heightSource === "ulna_length" || heightSource === "knee_height") {
     const from = heightSource === "ulna_length" ? "ulna length" : "knee height";
     lines.push(`Height: ${result.measurements.height_cm} cm — _estimated from ${from}, not measured_`);
+  }
+  const weightEstimated = result.measurements.weight_source === "estimated_65plus" || result.measurements.weight_source === "estimated_knee_height_mac";
+  if (weightEstimated) {
+    lines.push(`Weight: ${result.measurements.weight_kg} kg — _estimated (standard error ±${result.measurements.weight_error_kg} kg), not measured_`);
   }
   lines.push("");
 
@@ -302,8 +379,13 @@ export function formatAdultScreeningResult(result) {
     lines.push("");
   }
 
-  if (heightSource === "ulna_length" || heightSource === "knee_height") {
-    lines.push("_BMI is based on an estimated height, so BMI-based findings are estimates. MUAC, oedema and weight loss do not depend on height._");
+  const heightEstimated = heightSource === "ulna_length" || heightSource === "knee_height";
+  if (heightEstimated || weightEstimated) {
+    const what = heightEstimated && weightEstimated ? "weight and height" : weightEstimated ? "weight" : "height";
+    lines.push(`_BMI is based on an estimated ${what}, so BMI-based findings are estimates. MUAC, oedema and weight loss do not depend on it._`);
+    if (weightEstimated && result.measurements.weight_error_kg >= 7) {
+      lines.push(`⚠️ _The error of this weight equation is large (±${result.measurements.weight_error_kg} kg) — treat BMI as a rough guide and weigh the person when you can._`);
+    }
     lines.push("");
   }
 

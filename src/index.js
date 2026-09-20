@@ -76,10 +76,13 @@
  *      ./screeningShared.js.
  *
  *  17. "estimate weight for a patient" / "patient can't be weighed" ->
- *      a multi-turn body-weight ESTIMATE for a patient aged 65+ (arm and calf
- *      circumference, optional skinfold and knee height), calling the MCP
- *      server's weight_estimate_persons_65_and_older tool. A standalone
- *      calculator, never used to classify malnutrition. See ./weightEstimate.js.
+ *      a multi-turn body-weight ESTIMATE for a patient who can't be weighed
+ *      (ages 6+): arm circumference plus calf circumference (65+) and/or knee
+ *      height + race (up to 80), calling weight_estimate_persons_65_and_older
+ *      and/or weight_from_knee_height_and_mac on the MCP server. Standard errors
+ *      are large and always shown. The adult screening flow reuses the same
+ *      questions (as an explicit yes/no) to get a labelled BMI estimate. See
+ *      ./weightEstimate.js.
  *
  * Required secrets (set with `wrangler secret put <NAME>` — never hardcode these):
  *   WHATSAPP_TOKEN         - Meta permanent/system-user access token
@@ -144,7 +147,7 @@ import { handleUnder5ScreeningFlow, detectUnder5ScreeningTrigger } from "./under
 import { handlePregnantPostpartumScreeningFlow, detectPregnantPostpartumScreeningTrigger } from "./pregnantPostpartumScreening.js";
 import { handleSchoolAgeScreeningFlow, detectSchoolAgeScreeningTrigger } from "./schoolAgeScreening.js";
 import { handleAdultScreeningFlow, detectAdultScreeningTrigger } from "./adultScreening.js";
-import { handleWeightEstimateFlow, detectWeightEstimateTrigger } from "./weightEstimate.js";
+import { handleWeightEstimateFlow, detectWeightEstimateTrigger, WEIGHT_ESTIMATE_SAMPLE_PROMPT } from "./weightEstimate.js";
 import { clearAllScreeningSessions } from "./screeningShared.js";
 import {
   SCREENING_MENU_ROW_ID,
@@ -2588,6 +2591,7 @@ const PROMPT_EXAMPLES_EN = [
   { id: "Quinoa", title: "Look Up Any Food" },
   { id: WEIGHT_NUTRITION_SAMPLE_PROMPT, title: "Nutrition by Weight" },
   { id: SCREENING_MENU_ROW_ID, title: "Malnutrition Screening" },
+  { id: WEIGHT_ESTIMATE_SAMPLE_PROMPT, title: "Estimate Weight" }, // 10th and last row: WhatsApp lists allow at most 10
 ];
 
 const PROMPT_EXAMPLES_NY = [
@@ -2599,6 +2603,7 @@ const PROMPT_EXAMPLES_NY = [
   { id: "Quinoa", title: "Funsani Chakudya" },
   { id: WEIGHT_NUTRITION_SAMPLE_PROMPT, title: "Kulemera kwa Chakudya" },
   { id: SCREENING_MENU_ROW_ID, title: "Kuyeza Malnutrition" },
+  { id: WEIGHT_ESTIMATE_SAMPLE_PROMPT, title: "Estimate Weight" },
 ];
 
 async function sendPromptList(to, lang, env) {

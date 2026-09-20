@@ -72,15 +72,29 @@ In the adult flow, if the person was weighed but not measured standing (bedridde
 frail), the bot offers one extra question — ULNA length in cm — and the result is
 clearly labelled as based on an estimated height.
 
-**Weight estimate for a patient who can't be weighed** (65 and older): say
-"estimate weight for a patient" or "patient can't be weighed". The bot asks sex,
-age, arm circumference and calf circumference, then optionally a subscapular
-skinfold (needs a caliper) and knee height, and calls the MCP tool
-`weight_estimate_persons_65_and_older`. The reply shows the most precise
-estimate with its standard error and says it is not a measurement. It is a
-separate calculator: the estimate is never used for BMI or malnutrition
-classification. The race-specific 6–80 year knee-height tool is not offered
-because the bot doesn't ask race.
+**Weight estimate for a patient who can't be weighed** (ages 6 and up): tap
+**Estimate Weight** in the greeting list, or say "estimate weight for a patient"
+or "patient can't be weighed". The bot asks sex, age and arm circumference, then:
+
+- under 65: knee height, then race (the knee-height equations exist for black and
+  white only) — the only equation at those ages;
+- 65–80: calf circumference, and optionally knee height (+ race) and a
+  subscapular skinfold (needs a caliper);
+- over 80: calf circumference.
+
+It calls `weight_estimate_persons_65_and_older` and/or
+`weight_from_knee_height_and_mac` and headlines the equation with the lowest
+standard error. **The errors are large** (about 4–5 kg for the 65+ set; 7–14.5 kg,
+and 10.6–12 kg for adults 19–59, for the knee-height set), so the reply always
+shows the standard error and adds a rough-guide warning when it is large. Race is
+used for this session only.
+
+In the **adult screening flow**, if weight is skipped and arm circumference was
+given, the bot offers (yes/no) to estimate weight with the same questions. The MCP
+tool then reports BMI as a labelled estimate with a range, flags it uncertain when
+the range crosses a NACS BMI cut-off, and MUST uses that BMI too. MUAC, oedema and
+weight-loss findings never depend on an estimated weight. Estimated weight is not
+offered in the school-age flow.
 
 The flows hand people to each other from what they are told: "screen a child"
 moves to the 5–17 flow when the age is 5 or more, the 5–17 flow moves to the

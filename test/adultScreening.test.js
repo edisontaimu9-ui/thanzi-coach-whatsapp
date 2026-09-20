@@ -252,7 +252,8 @@ describe("handleAdultScreeningFlow — end to end with a fake env", () => {
     await say("man");
     await say("60");
     for (let i = 0; i < 2; i++) await say("skip"); // weight, height
-    await say("230"); // muac
+    assert.match(await say("230"), /Estimate weight\?/); // weight was skipped and MUAC given -> estimation is offered
+    await say("no"); // decline the estimate
     await say("skip"); // edema
     await say("skip"); // weight loss
     const final = await say("skip"); // context -> finish (no MUST gate)
@@ -395,5 +396,199 @@ describe("height estimated from ulna length", () => {
     assert.match(reply, /18\.5 to 32/);
     assert.match(reply, /ULNA length/);
     assert.equal(JSON.parse(env._rows.get(`${from}:adult_screening`).payload_json).step, "ulna");
+  });
+});
+
+describe("adult flow — offering to estimate weight when the person can't be weighed", () => {
+  const start = async (env, from, sex, age) => {
+    const say = (t) => handleAdultScreeningFlow(t, from, env);
+    await say("screen an adult for malnutrition");
+    await say(sex);
+    await say(age);
+    return say;
+  };
+
+  test("the weight prompt mentions the estimate option, and the offer only appears after MUAC when weight was skipped", async () => {
+    const env = makeFakeEnv({});
+    const say = await start(env, "265888500000", "woman", "72 years");
+    // (woman 72 -> no pregnancy question) weight prompt:
+    const saved = JSON.parse(env._rows.get("265888500000:adult_screening").payload_json);
+    assert.equal(saved.step, "weight");
+    assert.match((await say("skip")), /standing height/); // height question
+    assert.match(await say("160"), /MUAC/);
+    const offer = await say("275");
+    assert.match(offer, /You skipped weight/);
+    assert.match(offer, /Estimate weight\?/);
+  });
+
+  test("65+ woman: yes -> calf -> knee height skipped -> skinfold declined -> tool gets raw measurements and the opt-in flag", async () => {
+    const calls = [];
+    const env = makeFakeEnv(sampleResult(), calls);
+    const say = await start(env, "265888500001", "woman", "72 years");
+    await say("skip"); // weight
+    await say("160"); // height
+    await say("275"); // muac -> gate
+    assert.match(await say("yes"), /Calf circumference/);
+    assert.match(await say("31.5"), /Knee height/);
+    assert.match(await say("skip"), /skinfold/);
+    assert.match(await say("no"), /oedema/); // estimation block done; height is known, so no ulna question
+    await say("no"); // oedema
+    await say("no"); // weight loss
+    assert.match(await say("skip"), /MUST/); // context -> MUST offered: estimated weight + measured height give a BMI
+    await say("no");
+
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].name, "adult_integrated_screen");
+    const a = calls[0].args;
+    assert.equal(a.estimate_weight_if_missing, true);
+    assert.equal(a.calf_circumference_cm, 31.5);
+    assert.equal(a.muac_mm, 275);
+    assert.equal(a.height_cm, 160);
+    assert.equal(a.weight_kg, undefined);
+    assert.equal(a.knee_height_cm, undefined);
+    assert.equal(a.race, undefined);
+  });
+
+  test("under-65 man: knee height is required, RACE is asked, and both go to the tool", async () => {
+    const calls = [];
+    const env = makeFakeEnv(sampleResult(), calls);
+    const say = await start(env, "265888500002", "man", "40 years");
+    await say("skip"); // weight
+    await say("170"); // height
+    await say("300"); // muac -> gate
+    assert.match(await say("yes"), /Knee height/);
+    const raceQ = await say("50");
+    assert.match(raceQ, /race-specific/);
+    assert.match(await say("black"), /oedema/);
+    await say("no");
+    await say("no");
+    await say("skip"); // context
+    await say("no"); // MUST declined
+    const a = calls[0].args;
+    assert.equal(a.estimate_weight_if_missing, true);
+    assert.equal(a.knee_height_cm, 50);
+    assert.equal(a.race, "black");
+    assert.equal(a.calf_circumference_cm, undefined);
+  });
+
+  test("under 65: knee height cannot be skipped inside the estimate, and the flow stays on that step", async () => {
+    const env = makeFakeEnv(sampleResult());
+    const from = "265888500003";
+    const say = await start(env, from, "man", "40 years");
+    await say("skip");
+    await say("170");
+    await say("300");
+    await say("yes");
+    const reply = await say("skip");
+    assert.match(reply, /only equation/);
+    assert.equal(JSON.parse(env._rows.get(`${from}:adult_screening`).payload_json).step, "we_kh");
+  });
+
+  test("declining the estimate carries on exactly as before: no estimate flag, no MUST without a weight", async () => {
+    const calls = [];
+    const env = makeFakeEnv(sampleResult(), calls);
+    const say = await start(env, "265888500004", "man", "60 years");
+    await say("skip");
+    await say("170");
+    await say("230");
+    assert.match(await say("no"), /oedema/);
+    await say("no");
+    await say("no");
+    await say("skip"); // context -> no MUST offer (no weight) -> result
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].args.estimate_weight_if_missing, undefined);
+    assert.equal(calls[0].args.weight_kg, undefined);
+  });
+
+  test("ages with no equation (e.g. 59.5) are not offered the estimate at all", async () => {
+    const env = makeFakeEnv({});
+    const say = await start(env, "265888500005", "man", "59 years 6 months");
+    await say("skip");
+    await say("170");
+    assert.match(await say("230"), /oedema/); // straight past the gate
+  });
+
+  test("weight and height both missing after the estimate: the ulna question is asked at the end (65+ calf route)", async () => {
+    const env = makeFakeEnv(sampleResult());
+    const from = "265888500006";
+    const say = await start(env, from, "woman", "72 years");
+    await say("skip"); // weight
+    await say("skip"); // height
+    await say("275"); // muac
+    await say("yes");
+    await say("31.5"); // calf
+    await say("skip"); // knee height
+    const reply = await say("no"); // skinfold declined -> block done; no height, no ulna, no knee+race -> ulna question
+    assert.match(reply, /ULNA length/);
+    assert.equal(JSON.parse(env._rows.get(`${from}:adult_screening`).payload_json).step, "ulna_late");
+    assert.match(await say("26.5"), /oedema/);
+  });
+
+  test("knee height + race also lets the MCP tool estimate height, so no ulna question is needed", async () => {
+    const env = makeFakeEnv(sampleResult());
+    const say = await start(env, "265888500007", "man", "40 years");
+    await say("skip"); // weight
+    await say("skip"); // height
+    await say("300");
+    await say("yes");
+    await say("50");
+    assert.match(await say("black"), /oedema/);
+  });
+
+  test("'done' inside the estimate questions finishes only the estimate block, not the whole intake", async () => {
+    const env = makeFakeEnv(sampleResult());
+    const from = "265888500008";
+    const say = await start(env, from, "woman", "72 years");
+    await say("skip");
+    await say("160");
+    await say("275");
+    await say("yes");
+    await say("31.5");
+    await say("skip"); // knee height -> skinfold offer
+    assert.match(await say("done"), /oedema/);
+  });
+
+  test("the gate rejects a non yes/no answer and 'skip' means no", async () => {
+    const env = makeFakeEnv(sampleResult());
+    const from = "265888500009";
+    const say = await start(env, from, "man", "60 years");
+    await say("skip");
+    await say("170");
+    await say("230");
+    assert.match(await say("maybe"), /yes\* or \*no/);
+    assert.match(await say("skip"), /oedema/);
+  });
+});
+
+describe("formatAdultScreeningResult — estimated weight", () => {
+  const withMeasurements = (m) => sampleResult({ measurements: { bmi: 20.5, weight_kg: 52.4, height_cm: 160, height_source: "measured", ...m } });
+
+  test("shows the estimated weight with its standard error, the BMI range, and the caveat", () => {
+    const text = formatAdultScreeningResult(
+      withMeasurements({ weight_source: "estimated_65plus", weight_error_kg: 4.96, bmi_range_from_estimate_error: { low: 18.5, high: 22.4 } })
+    );
+    assert.match(text, /BMI 20\.5 \(could be 18\.5–22\.4\)/);
+    assert.match(text, /Weight: 52\.4 kg — _estimated \(standard error ±4\.96 kg\), not measured_/);
+    assert.match(text, /BMI is based on an estimated weight/);
+    assert.doesNotMatch(text, /⚠️ _The error of this weight equation is large/);
+  });
+
+  test("a large weight error gets the rough-guide warning; weight + height both estimated say so", () => {
+    const text = formatAdultScreeningResult(
+      withMeasurements({
+        weight_source: "estimated_knee_height_mac",
+        weight_error_kg: 11.3,
+        height_source: "knee_height",
+        bmi_range_from_estimate_error: { low: 15, high: 26 },
+      })
+    );
+    assert.match(text, /BMI is based on an estimated weight and height/);
+    assert.match(text, /The error of this weight equation is large \(±11\.3 kg\)/);
+  });
+
+  test("measured weight and height carry none of this", () => {
+    const text = formatAdultScreeningResult(withMeasurements({ weight_source: "measured" }));
+    assert.doesNotMatch(text, /estimated/i);
+    assert.doesNotMatch(text, /could be/);
   });
 });
