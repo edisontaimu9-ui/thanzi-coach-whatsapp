@@ -68,6 +68,10 @@ screening" or "screen for malnutrition" opens the same menu):
 - Adults: "Screen an adult for malnutrition", "check muac for an elderly patient", "screen a man for malnutrition"
 - Pregnant / postpartum: "Screen a pregnant woman for malnutrition", "postpartum malnutrition screening"
 
+In the adult flow, if the person was weighed but not measured standing (bedridden,
+frail), the bot offers one extra question — ULNA length in cm — and the result is
+clearly labelled as based on an estimated height.
+
 The flows hand people to each other from what they are told: "screen a child"
 moves to the 5–17 flow when the age is 5 or more, the 5–17 flow moves to the
 adult flow at 18, and a girl/woman who is pregnant or recently gave birth is

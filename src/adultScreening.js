@@ -16,6 +16,14 @@
  * Screening Tool) risk check is offered when weight and height were given
  * (MUST needs a BMI); it is reported on a separate axis.
  *
+ * HEIGHT ESTIMATE: if weight was given but standing height was skipped (bedridden,
+ * frail, contractures), the flow offers ONE extra question — ULNA length — and
+ * sends it as ulna_length_cm; the MCP tool estimates the height and labels every
+ * BMI-based finding as an estimate. Knee height is not offered here: its
+ * equations need the person's race, which this flow does not ask. It stays
+ * available by calling adult_integrated_screen directly. Weight is never
+ * estimated (the published equations are too coarse for a BMI).
+ *
  * ROUTING: a woman under 50 is asked whether she is pregnant or recently
  * gave birth — "yes" hands over to the maternal flow. Under-18 ages are
  * turned away with a pointer to "screen a school child" / "screen a child".
@@ -75,6 +83,8 @@ export function promptFor(step) {
       return "What is the person's weight in kilograms? (e.g. *58.5*). Reply *skip* if not available.";
     case "height":
       return "What is the person's standing height in centimetres? (e.g. *165*). Reply *skip* if not available.";
+    case "ulna":
+      return "Can't stand for a height measurement? You can estimate it from ULNA length instead: with the arm bent and the palm across the chest, measure the LEFT forearm from the point of the elbow to the midpoint of the bony bump of the wrist. Reply in cm (e.g. *26.5*, between 18.5 and 32), or *skip*.";
     case "muac":
       return "What is the person's MUAC (mid-upper arm circumference), if measured? Reply in mm (e.g. *230*) or cm (e.g. *23cm*). Reply *skip* if not available.";
     case "edema":
@@ -106,6 +116,9 @@ export function nextStep(step, data) {
     case "weight":
       return "height";
     case "height":
+      // Weight but no standing height: offer the ulna-length estimate (it is only useful when a BMI can result)
+      return data.weight_kg !== undefined && data.height_cm === undefined ? "ulna" : "muac";
+    case "ulna":
       return "muac";
     case "muac":
       return "edema";
@@ -114,8 +127,8 @@ export function nextStep(step, data) {
     case "weight_loss":
       return "context";
     case "context":
-      // MUST needs a BMI, so only offer it when weight AND height were both given
-      return data.weight_kg !== undefined && data.height_cm !== undefined ? "must_gate" : "finish";
+      // MUST needs a BMI, so only offer it when weight AND a height (measured, or estimable from ulna length) were given
+      return data.weight_kg !== undefined && (data.height_cm !== undefined || data.ulna_length_cm !== undefined) ? "must_gate" : "finish";
     case "must_gate":
       return data.wantsMust ? "must_wl" : "finish";
     case "must_wl":
@@ -179,6 +192,15 @@ export function applyReply(step, text, data) {
       data.height_cm = v;
       return { advance: true };
     }
+    case "ulna": {
+      const v = parseNumber(text);
+      if (v === null) return { error: "Please reply with the ulna length in cm (e.g. *26.5*), or *skip*." };
+      if (v < 18.5 || v > 32) {
+        return { error: "The ulna length table covers 18.5 to 32 cm. Please re-measure and reply in cm (e.g. *26.5*), or *skip*." };
+      }
+      data.ulna_length_cm = v;
+      return { advance: true };
+    }
     case "muac": {
       const v = parseMuacMm(text);
       if (v === null) return { error: "Please reply with a number in mm or cm (e.g. *230* or *23cm*), or *skip*." };
@@ -235,6 +257,7 @@ export function buildScreenArgs(data) {
     ...ageArgs(data),
     weight_kg: data.weight_kg,
     height_cm: data.height_cm,
+    ulna_length_cm: data.ulna_length_cm,
     muac_mm: data.muac_mm,
     edema: data.edema,
     confirmed_weight_loss_over_10_percent: data.confirmed_weight_loss_over_10_percent,
@@ -256,6 +279,11 @@ export function formatAdultScreeningResult(result) {
   lines.push("*Adult Malnutrition Screening Result*");
   const bmi = result.measurements.bmi !== null ? `, BMI ${result.measurements.bmi}` : "";
   lines.push(`Adult: ${result.person.age_years} years, ${result.person.sex === "female" ? "woman" : "man"}${bmi}`);
+  const heightSource = result.measurements.height_source;
+  if (heightSource === "ulna_length" || heightSource === "knee_height") {
+    const from = heightSource === "ulna_length" ? "ulna length" : "knee height";
+    lines.push(`Height: ${result.measurements.height_cm} cm — _estimated from ${from}, not measured_`);
+  }
   lines.push("");
 
   if (result.nacs_classification && result.nacs_classification.indicators.length > 0) {
@@ -271,6 +299,11 @@ export function formatAdultScreeningResult(result) {
     const m = result.screening.must;
     lines.push("*Risk screening*");
     lines.push(`• MUST: score ${m.total_score} — ${m.risk_category} risk`);
+    lines.push("");
+  }
+
+  if (heightSource === "ulna_length" || heightSource === "knee_height") {
+    lines.push("_BMI is based on an estimated height, so BMI-based findings are estimates. MUAC, oedema and weight loss do not depend on height._");
     lines.push("");
   }
 
@@ -295,7 +328,8 @@ export async function explainAdultScreeningResult(result, env) {
     "over WhatsApp. You are NOT deciding anything — every number, classification, and recommendation has " +
     "already been computed by deterministic clinical rules (NACS oedema/MUAC/BMI/weight-loss cut-offs and, if " +
     "present, the BAPEN MUST score). The NACS result and the MUST score are separate axes and may differ; " +
-    "explain each without merging them. Overweight or obesity is not acute malnutrition; state it plainly if " +
+    "explain each without merging them. If the result says height was estimated (from ulna length or knee " +
+    "height), say plainly that BMI rests on an estimate. Overweight or obesity is not acute malnutrition; state it plainly if " +
     "present. Your only job is to explain the findings warmly and plainly, in 3-6 short sentences, in English only. " +
     NARRATION_RULES;
   const text = await narrateWithGroq(systemPrompt, result, env, 500);

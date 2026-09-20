@@ -301,3 +301,99 @@ describe("handleAdultScreeningFlow — end to end with a fake env", () => {
     assert.equal(saved.data.weight_kg, undefined); // only sex/age fields are carried, nothing else
   });
 });
+
+describe("height estimated from ulna length", () => {
+  test("the ulna question is asked only when weight was given but standing height was skipped", () => {
+    assert.equal(nextStep("height", { weight_kg: 50 }), "ulna");
+    assert.equal(nextStep("height", { weight_kg: 50, height_cm: 165 }), "muac");
+    assert.equal(nextStep("height", {}), "muac"); // no weight: an estimated height could not produce a BMI
+    assert.equal(nextStep("ulna", { weight_kg: 50 }), "muac");
+  });
+
+  test("ulna reply: accepts 18.5-32 cm, rejects out-of-table values with a clear prompt, skip leaves it unset", () => {
+    const d = {};
+    assert.deepEqual(applyReply("ulna", "26.5", d), { advance: true });
+    assert.equal(d.ulna_length_cm, 26.5);
+    for (const bad of ["17", "40", "265"]) {
+      const r = applyReply("ulna", bad, {});
+      assert.ok("error" in r, bad);
+      assert.match(r.error, /18\.5 to 32/);
+    }
+    assert.ok("error" in applyReply("ulna", "abc", {}));
+    const d2 = {};
+    assert.deepEqual(applyReply("ulna", "skip", d2), { advance: true });
+    assert.equal(d2.ulna_length_cm, undefined);
+  });
+
+  test("the MUST offer follows an estimable height, not only a measured one", () => {
+    assert.equal(nextStep("context", { weight_kg: 50, ulna_length_cm: 26 }), "must_gate");
+    assert.equal(nextStep("context", { weight_kg: 50 }), "finish");
+    assert.equal(nextStep("context", { ulna_length_cm: 26 }), "finish"); // no weight, still no BMI
+  });
+
+  test("buildScreenArgs sends ulna_length_cm and only when collected", () => {
+    const withUlna = JSON.parse(JSON.stringify(buildScreenArgs({ sex: "male", age_years: 70, weight_kg: 50, ulna_length_cm: 26.5 })));
+    assert.deepEqual(withUlna, { sex: "male", age_years: 70, weight_kg: 50, ulna_length_cm: 26.5 });
+    assert.equal("ulna_length_cm" in JSON.parse(JSON.stringify(buildScreenArgs({ sex: "male", age_years: 70 }))), false);
+  });
+
+  test("the result names the estimate and adds the caveat; measured heights get neither", () => {
+    const estimated = formatAdultScreeningResult(
+      sampleResult({ measurements: { bmi: 20, height_cm: 173, height_source: "ulna_length" } })
+    );
+    assert.match(estimated, /Height: 173 cm — _estimated from ulna length, not measured_/);
+    assert.match(estimated, /BMI is based on an estimated height/);
+
+    const knee = formatAdultScreeningResult(sampleResult({ measurements: { bmi: 17, height_cm: 162.9, height_source: "knee_height" } }));
+    assert.match(knee, /estimated from knee height/);
+
+    const measured = formatAdultScreeningResult(sampleResult({ measurements: { bmi: 20, height_cm: 170, height_source: "measured" } }));
+    assert.doesNotMatch(measured, /estimated/i);
+    const none = formatAdultScreeningResult(sampleResult());
+    assert.doesNotMatch(none, /estimated/i);
+  });
+
+  test("end to end: weight given, height skipped -> ulna question -> tool receives ulna_length_cm and no height", async () => {
+    const calls = [];
+    const env = makeFakeEnv(
+      sampleResult({ measurements: { bmi: 20, height_cm: 173, height_source: "ulna_length" } }),
+      calls
+    );
+    const from = "265888200010";
+    const say = (t) => handleAdultScreeningFlow(t, from, env);
+
+    await say("screen an adult for malnutrition");
+    await say("man");
+    await say("72 years");
+    await say("58"); // weight
+    assert.match(await say("skip"), /ULNA length/); // height skipped -> ulna question
+    assert.match(await say("26.5"), /MUAC/);
+    await say("230"); // muac
+    await say("no"); // oedema
+    await say("no"); // weight loss
+    assert.match(await say("skip"), /MUST/); // context -> MUST offered because a height can be estimated
+    const final = await say("no");
+
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].name, "adult_integrated_screen");
+    assert.equal(calls[0].args.ulna_length_cm, 26.5);
+    assert.equal(calls[0].args.height_cm, undefined);
+    assert.equal(calls[0].args.weight_kg, 58);
+    assert.match(final, /estimated from ulna length/);
+  });
+
+  test("an out-of-range ulna reprompts and the session stays on that step", async () => {
+    const env = makeFakeEnv({});
+    const from = "265888200011";
+    const say = (t) => handleAdultScreeningFlow(t, from, env);
+    await say("screen an adult for malnutrition");
+    await say("woman");
+    await say("70 years");
+    await say("50");
+    await say("skip"); // height
+    const reply = await say("45");
+    assert.match(reply, /18\.5 to 32/);
+    assert.match(reply, /ULNA length/);
+    assert.equal(JSON.parse(env._rows.get(`${from}:adult_screening`).payload_json).step, "ulna");
+  });
+});
