@@ -23,12 +23,13 @@ export const MCP_FETCH_TIMEOUT_MS = 10000;
 export const GROQ_EXPLAIN_TIMEOUT_MS = 10000;
 export const GROQ_EXPLAIN_MODEL = "openai/gpt-oss-120b";
 
-/** Every screening flow's session kind. Used to let a fresh trigger phrase cleanly replace a stale half-finished flow. */
+/** Every guided flow's session kind. Used to let a fresh trigger phrase cleanly replace a stale half-finished flow. */
 export const ALL_SCREENING_SESSION_KINDS = [
   "under5_screening",
   "pregnant_postpartum_screening",
   "school_age_screening",
   "adult_screening",
+  "weight_estimate", // not a screening flow, but a fresh trigger for any flow should also discard a stale weight-estimate session
 ];
 
 // ── D1 session helpers ──

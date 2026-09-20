@@ -72,6 +72,16 @@ In the adult flow, if the person was weighed but not measured standing (bedridde
 frail), the bot offers one extra question — ULNA length in cm — and the result is
 clearly labelled as based on an estimated height.
 
+**Weight estimate for a patient who can't be weighed** (65 and older): say
+"estimate weight for a patient" or "patient can't be weighed". The bot asks sex,
+age, arm circumference and calf circumference, then optionally a subscapular
+skinfold (needs a caliper) and knee height, and calls the MCP tool
+`weight_estimate_persons_65_and_older`. The reply shows the most precise
+estimate with its standard error and says it is not a measurement. It is a
+separate calculator: the estimate is never used for BMI or malnutrition
+classification. The race-specific 6–80 year knee-height tool is not offered
+because the bot doesn't ask race.
+
 The flows hand people to each other from what they are told: "screen a child"
 moves to the 5–17 flow when the age is 5 or more, the 5–17 flow moves to the
 adult flow at 18, and a girl/woman who is pregnant or recently gave birth is

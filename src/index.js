@@ -75,6 +75,12 @@
  *      reuse CHAKUDYA_MCP / CHAKUDYA_MCP_AUTH_TOKEN; shared plumbing is in
  *      ./screeningShared.js.
  *
+ *  17. "estimate weight for a patient" / "patient can't be weighed" ->
+ *      a multi-turn body-weight ESTIMATE for a patient aged 65+ (arm and calf
+ *      circumference, optional skinfold and knee height), calling the MCP
+ *      server's weight_estimate_persons_65_and_older tool. A standalone
+ *      calculator, never used to classify malnutrition. See ./weightEstimate.js.
+ *
  * Required secrets (set with `wrangler secret put <NAME>` — never hardcode these):
  *   WHATSAPP_TOKEN         - Meta permanent/system-user access token
  *   VERIFY_TOKEN           - a string you invent; must match what you enter in
@@ -138,6 +144,7 @@ import { handleUnder5ScreeningFlow, detectUnder5ScreeningTrigger } from "./under
 import { handlePregnantPostpartumScreeningFlow, detectPregnantPostpartumScreeningTrigger } from "./pregnantPostpartumScreening.js";
 import { handleSchoolAgeScreeningFlow, detectSchoolAgeScreeningTrigger } from "./schoolAgeScreening.js";
 import { handleAdultScreeningFlow, detectAdultScreeningTrigger } from "./adultScreening.js";
+import { handleWeightEstimateFlow, detectWeightEstimateTrigger } from "./weightEstimate.js";
 import { clearAllScreeningSessions } from "./screeningShared.js";
 import {
   SCREENING_MENU_ROW_ID,
@@ -360,6 +367,7 @@ async function handleTextMessage(userText, from, env, ctx) {
     detectUnder5ScreeningTrigger(userText) ||
     detectPregnantPostpartumScreeningTrigger(userText) ||
     detectAdultScreeningTrigger(userText) ||
+    detectWeightEstimateTrigger(userText) ||
     detectScreeningMenuRequest(userText)
   ) {
     await clearAllScreeningSessions(from, env);
@@ -394,6 +402,14 @@ async function handleTextMessage(userText, from, env, ctx) {
   const adultScreeningReply = await handleAdultScreeningFlow(userText, from, env);
   if (adultScreeningReply !== null) {
     await sendWhatsAppReply(from, adultScreeningReply, env);
+    return;
+  }
+
+  // Weight estimate for a 65+ patient who can't be weighed — see ./weightEstimate.js. A standalone
+  // calculator: its result is never used for malnutrition classification.
+  const weightEstimateReply = await handleWeightEstimateFlow(userText, from, env);
+  if (weightEstimateReply !== null) {
+    await sendWhatsAppReply(from, weightEstimateReply, env);
     return;
   }
 
