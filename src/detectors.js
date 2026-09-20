@@ -161,6 +161,12 @@ export function stripLeadingFillers(phrase) {
   return words.join(" ");
 }
 
+// Sample prompt for the greeting list's "Nutrition by Weight" row. Written as a plain question (rather than
+// the bare "quinoa 200g") so it reads as what the feature does. It avoids the word "calories" on purpose:
+// "how many calories in 200g of ..." is caught earlier by detectEnergyRequirementRequest, which is for
+// energy-requirement questions, not food weights. test/detectors.test.js checks only detectFoodQuantity fires.
+export const WEIGHT_NUTRITION_SAMPLE_PROMPT = "What is the nutrition in 200g of quinoa?";
+
 // Detects a food + specific gram amount, in either order:
 // "200g of quinoa" / "how many calories in 200g of rice?" (amount first),
 // or "quinoa 200g" / "find energy and macros for quinoa 200g" (amount last).

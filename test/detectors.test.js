@@ -1,5 +1,6 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import * as allDetectors from "../src/detectors.js";
 
 import {
   looksLikeBarcode,
@@ -14,6 +15,7 @@ import {
   detectLabelRequest,
   detectDriRequest,
   IRON_NEEDS_SAMPLE_PROMPT,
+  WEIGHT_NUTRITION_SAMPLE_PROMPT,
   detectComparisonFollowUp,
   detectMealPlanEdit,
 } from "../src/detectors.js";
@@ -351,5 +353,18 @@ describe("detectMealPlanEdit", () => {
 
   test("does not match an unrelated question", () => {
     assert.equal(detectMealPlanEdit("what is nsima"), null);
+  });
+});
+
+describe("greeting-list 'Nutrition by Weight' sample prompt", () => {
+  test("is read as quinoa, 200 g", () => {
+    assert.deepEqual(detectFoodQuantity(WEIGHT_NUTRITION_SAMPLE_PROMPT), { food: "quinoa", grams: 200 });
+  });
+
+  test("no other detector claims it before the food-weight branch does", () => {
+    for (const [name, fn] of Object.entries(allDetectors)) {
+      if (!/^detect/.test(name) || name === "detectFoodQuantity" || typeof fn !== "function") continue;
+      assert.ok(!fn(WEIGHT_NUTRITION_SAMPLE_PROMPT), `${name} unexpectedly matches the sample prompt`);
+    }
   });
 });

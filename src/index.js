@@ -129,6 +129,7 @@ import {
   detectMealPlanRequest,
   detectEnergyRequirementRequest,
   IRON_NEEDS_SAMPLE_PROMPT,
+  WEIGHT_NUTRITION_SAMPLE_PROMPT,
   detectComparisonFollowUp,
   detectMealPlanEdit,
 } from "./detectors.js";
@@ -1187,8 +1188,11 @@ function scaleFoodToGrams(context, grams) {
   if (calcium != null) micros.push(`Calcium ${calcium}mg`);
   if (iron != null) micros.push(`Iron ${iron}mg`);
 
-  const lines = [`*${context.name}* — ${grams} g`, macros.join(", ")];
+  // Headed as a nutrition-for-this-weight answer (not a plain food card), with the base amount it was
+  // scaled from, so it's clear these numbers are for the requested portion.
+  const lines = [`⚖️ *Nutrition in ${grams} g of ${context.name}*`, macros.join(", ")];
   if (micros.length) lines.push(micros.join(", "));
+  lines.push(`_Scaled from the ${context.baseGrams} g reference values._`);
   return lines.join("\n");
 }
 
@@ -2566,7 +2570,7 @@ const PROMPT_EXAMPLES_EN = [
   { id: "Interactions with warfarin", title: "Drug-Food Interactions" },
   { id: IRON_NEEDS_SAMPLE_PROMPT, title: "Iron Needs" },
   { id: "Quinoa", title: "Look Up Any Food" },
-  { id: "quinoa 200g", title: "Nutrition by Weight" },
+  { id: WEIGHT_NUTRITION_SAMPLE_PROMPT, title: "Nutrition by Weight" },
   { id: SCREENING_MENU_ROW_ID, title: "Malnutrition Screening" },
 ];
 
@@ -2577,7 +2581,7 @@ const PROMPT_EXAMPLES_NY = [
   { id: "Exchange list for a diabetic patient", title: "Kudya kwa Shuga" },
   { id: IRON_NEEDS_SAMPLE_PROMPT, title: "Iron Yofunika Tsiku" },
   { id: "Quinoa", title: "Funsani Chakudya" },
-  { id: "quinoa 200g", title: "Kulemera kwa Chakudya" },
+  { id: WEIGHT_NUTRITION_SAMPLE_PROMPT, title: "Kulemera kwa Chakudya" },
   { id: SCREENING_MENU_ROW_ID, title: "Kuyeza Malnutrition" },
 ];
 
