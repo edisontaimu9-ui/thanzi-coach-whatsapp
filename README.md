@@ -72,9 +72,25 @@ In the adult flow, if the person was weighed but not measured standing (bedridde
 frail), the bot offers one extra question — ULNA length in cm — and the result is
 clearly labelled as based on an estimated height.
 
-**Weight estimate for a patient who can't be weighed** (ages 6 and up): tap
-**Estimate Weight** in the greeting list, or say "estimate weight for a patient"
-or "patient can't be weighed". The bot asks sex, age and arm circumference, then:
+The flows hand people to each other from what they are told: "screen a child"
+moves to the 5–17 flow when the age is 5 or more, the 5–17 flow moves to the
+adult flow at 18, and a girl/woman who is pregnant or recently gave birth is
+moved to the maternal flow. Saying a new screening phrase discards any
+half-finished screening. Shared code for the two newer flows is in
+`src/screeningShared.js`.
+
+## Weight / height estimate flows
+
+Two standalone calculators for a patient who can't be weighed or measured
+directly — their results are never used for malnutrition classification
+(the adult screening flow above has its own, narrower ulna-only height
+estimate that does feed into a BMI). Tap **Estimate Patient** in the
+greeting list to open a weight-or-height picker (`src/estimateMenu.js`,
+say "estimate a patient" to open it by typing), or go straight to either
+flow by name:
+
+**Weight estimate** (ages 6 and up) — say "estimate weight for a patient" or
+"patient can't be weighed". The bot asks sex, age and arm circumference, then:
 
 - under 65: knee height, then race (the knee-height equations exist for black and
   white only) — the only equation at those ages;
@@ -87,7 +103,7 @@ It calls `weight_estimate_persons_65_and_older` and/or
 standard error. **The errors are large** (about 4–5 kg for the 65+ set; 7–14.5 kg,
 and 10.6–12 kg for adults 19–59, for the knee-height set), so the reply always
 shows the standard error and adds a rough-guide warning when it is large. Race is
-used for this session only.
+used for this session only. See `src/weightEstimate.js`.
 
 In the **adult screening flow**, if weight is skipped and arm circumference was
 given, the bot offers (yes/no) to estimate weight with the same questions. The MCP
@@ -96,18 +112,9 @@ the range crosses a NACS BMI cut-off, and MUST uses that BMI too. MUAC, oedema a
 weight-loss findings never depend on an estimated weight. Estimated weight is not
 offered in the school-age flow.
 
-The flows hand people to each other from what they are told: "screen a child"
-moves to the 5–17 flow when the age is 5 or more, the 5–17 flow moves to the
-adult flow at 18, and a girl/woman who is pregnant or recently gave birth is
-moved to the maternal flow. Saying a new screening phrase discards any
-half-finished screening. Shared code for the two newer flows is in
-`src/screeningShared.js`.
-
-**Height estimate for a patient who can't be measured standing** (say
-"estimate height for a patient" or "patient can't stand" — not in the
-greeting list, which is already at WhatsApp's 10-row cap): the bot asks sex
-and age, then which ONE measurement is available, offering only the methods
-with a published equation at that age:
+**Height estimate** — say "estimate height for a patient" or "patient can't
+stand". The bot asks sex and age, then which ONE measurement is available,
+offering only the methods with a published equation at that age:
 
 - knee height (ages 6+, plus race — black/white only) — `stature_from_knee_height`
   (Lee & Nieman), returns a standard error;
