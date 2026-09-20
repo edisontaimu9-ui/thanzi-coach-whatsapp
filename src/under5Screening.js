@@ -58,6 +58,9 @@
  * WhatsApp number here if that ever matters.
  */
 
+import { beginSchoolAgeScreening } from "./schoolAgeScreening.js";
+
+
 const SESSION_KIND = "under5_screening";
 const SESSION_TTL_MS = 60 * 60 * 1000; // 60 minutes — same as other multi-turn flows in this repo
 const MCP_FETCH_TIMEOUT_MS = 10000;
@@ -139,6 +142,10 @@ function parseSex(text) {
 function parseAge(text) {
   const t = text.trim().toLowerCase();
   if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return { date_of_birth: t };
+  // "2 years 6 months" / "2y 6m" — must be handled before the months-only match below,
+  // which would otherwise read it as just "6 months".
+  const yearsAndMonths = t.match(/(\d+(?:\.\d+)?)\s*(?:years?|yrs?|y)\b\s*(?:and\s*)?(\d+(?:\.\d+)?)\s*(?:months?|mos?|m)\b/);
+  if (yearsAndMonths) return { age_months: Math.round(parseFloat(yearsAndMonths[1]) * 12 + parseFloat(yearsAndMonths[2])) };
   const months = t.match(/(\d+(?:\.\d+)?)\s*(months?|mos?)\b/);
   if (months) return { age_months: parseFloat(months[1]) };
   const years = t.match(/(\d+(?:\.\d+)?)\s*(years?|yrs?|y)\b/);
@@ -634,6 +641,17 @@ export async function handleUnder5ScreeningFlow(userText, from, env) {
 
   if ("error" in result) {
     return `${result.error}\n\n${promptFor(step)}`;
+  }
+
+  // A child who turns out to be 5 or older belongs to the school-age flow (BMI-for-age, MUAC bands).
+  // Hand over the sex/age already collected instead of failing at the end with an out-of-scope error.
+  if (step === "age" && "advance" in result && resolvedAgeMonthsEstimate(data) >= 60) {
+    await clearSession(from, env);
+    const preset = { sex: data.sex };
+    for (const k of ["age_months", "age_years", "date_of_birth", "assessment_date"]) {
+      if (data[k] !== undefined) preset[k] = data[k];
+    }
+    return await beginSchoolAgeScreening(from, env, preset);
   }
 
   const isFinishing = result.finish === true || nextStep(step, data) === "finish";

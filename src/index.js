@@ -62,6 +62,18 @@
  *      Groq-narrates-only-with-hardcoded-action-appended architecture as
  *      #13 above. See ./pregnantPostpartumScreening.js. No new secret or
  *      binding needed — reuses CHAKUDYA_MCP / CHAKUDYA_MCP_AUTH_TOKEN.
+ *  15. "screen a school child for malnutrition" / "check BMI for a 9 year old" ->
+ *      a multi-turn 5-17 year screen (BMI-for-age, MUAC, oedema, optional
+ *      STRONGkids) calling the MCP server's school_age_integrated_screen tool.
+ *      "screen a child" also lands here automatically when the age given is 5+.
+ *      See ./schoolAgeScreening.js.
+ *  16. "screen an adult for malnutrition" / "check muac for an elderly patient" ->
+ *      a multi-turn adult (18+, not pregnant/postpartum) screen (NACS oedema,
+ *      MUAC, BMI, weight loss, optional MUST) calling the MCP server's
+ *      adult_integrated_screen tool. See ./adultScreening.js. The flows hand
+ *      people to each other by age/pregnancy (see each file's header). Both
+ *      reuse CHAKUDYA_MCP / CHAKUDYA_MCP_AUTH_TOKEN; shared plumbing is in
+ *      ./screeningShared.js.
  *
  * Required secrets (set with `wrangler secret put <NAME>` — never hardcode these):
  *   WHATSAPP_TOKEN         - Meta permanent/system-user access token
@@ -120,8 +132,11 @@ import {
   detectMealPlanEdit,
 } from "./detectors.js";
 import { calculateEnergyRequirement } from "./energy.js";
-import { handleUnder5ScreeningFlow } from "./under5Screening.js";
-import { handlePregnantPostpartumScreeningFlow } from "./pregnantPostpartumScreening.js";
+import { handleUnder5ScreeningFlow, detectUnder5ScreeningTrigger } from "./under5Screening.js";
+import { handlePregnantPostpartumScreeningFlow, detectPregnantPostpartumScreeningTrigger } from "./pregnantPostpartumScreening.js";
+import { handleSchoolAgeScreeningFlow, detectSchoolAgeScreeningTrigger } from "./schoolAgeScreening.js";
+import { handleAdultScreeningFlow, detectAdultScreeningTrigger } from "./adultScreening.js";
+import { clearAllScreeningSessions } from "./screeningShared.js";
 
 // Default per-request timeout for outbound HTTP calls (Chakudya, Groq,
 // WhatsApp Cloud API). Without this, a hung upstream stalls the request
@@ -327,6 +342,27 @@ async function handleTextMessage(userText, from, env, ctx) {
   // session (a bare "12" or "yes" mid-flow must never be swallowed by
   // food/greeting detection below) and so the trigger phrase for starting
   // a new session wins over every other detector.
+  //
+  // Four screening flows now exist (school-age, under-5, pregnant/postpartum, adult), each with its
+  // own session kind. A fresh trigger phrase for ANY of them first discards half-finished sessions
+  // of the others, so an abandoned flow can never swallow the new request as if it were an answer.
+  if (
+    detectSchoolAgeScreeningTrigger(userText) ||
+    detectUnder5ScreeningTrigger(userText) ||
+    detectPregnantPostpartumScreeningTrigger(userText) ||
+    detectAdultScreeningTrigger(userText)
+  ) {
+    await clearAllScreeningSessions(from, env);
+  }
+
+  // School-age/adolescent (5-17y) screening — see ./schoolAgeScreening.js. Checked BEFORE under-5
+  // because "school child" also contains the word "child".
+  const schoolAgeScreeningReply = await handleSchoolAgeScreeningFlow(userText, from, env);
+  if (schoolAgeScreeningReply !== null) {
+    await sendWhatsAppReply(from, schoolAgeScreeningReply, env);
+    return;
+  }
+
   const screeningReply = await handleUnder5ScreeningFlow(userText, from, env);
   if (screeningReply !== null) {
     await sendWhatsAppReply(from, screeningReply, env);
@@ -340,6 +376,14 @@ async function handleTextMessage(userText, from, env, ctx) {
   const pregnantScreeningReply = await handlePregnantPostpartumScreeningFlow(userText, from, env);
   if (pregnantScreeningReply !== null) {
     await sendWhatsAppReply(from, pregnantScreeningReply, env);
+    return;
+  }
+
+  // Adult (18+, not pregnant/postpartum) screening — see ./adultScreening.js. Checked AFTER the
+  // pregnant flow because "a pregnant woman" also matches the adult flow's population words.
+  const adultScreeningReply = await handleAdultScreeningFlow(userText, from, env);
+  if (adultScreeningReply !== null) {
+    await sendWhatsAppReply(from, adultScreeningReply, env);
     return;
   }
 

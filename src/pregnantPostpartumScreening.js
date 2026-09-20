@@ -357,6 +357,16 @@ export async function explainPregnantPostpartumScreeningResult(result, env) {
 // ── Entry point ──
 
 /**
+ * Starts a pregnant/postpartum session and returns the first prompt. Used by
+ * the school-age and adult flows when the person turns out to be pregnant or
+ * recently postpartum, so they can be handed over without retyping a trigger.
+ */
+export async function beginPregnantPostpartumScreening(from, env) {
+  await saveSession(from, {}, "muac", env);
+  return promptFor("muac");
+}
+
+/**
  * Handles one incoming text message as part of (or the start of) a
  * pregnant/postpartum screening flow. Returns a reply string if handled,
  * or `null` if not (caller should fall through to normal dispatch).

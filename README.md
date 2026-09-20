@@ -46,6 +46,26 @@ Then watch the deploy under the repo's **Actions** tab on GitHub.
 3. Verify token: the same string you set as `VERIFY_TOKEN`
 4. Subscribe to the `messages` webhook field
 
+## Malnutrition screening flows
+
+Four guided WhatsApp flows call the Chakudya MCP server (service binding
+`CHAKUDYA_MCP` + secret `CHAKUDYA_MCP_AUTH_TOKEN`, already set up for the
+under-5 flow — nothing new to configure):
+
+| Say | Flow | MCP tool |
+|---|---|---|
+| "screen a child for malnutrition" | under 5 years | `under5_integrated_screen` |
+| "screen a school child" / "check BMI for a 9 year old" | 5–17 years | `school_age_integrated_screen` |
+| "screen a pregnant woman" | pregnant / postpartum | `pregnant_postpartum_integrated_screen` |
+| "screen an adult" / "check muac for an elderly patient" | adults 18+ | `adult_integrated_screen` |
+
+The flows hand people to each other from what they are told: "screen a child"
+moves to the 5–17 flow when the age is 5 or more, the 5–17 flow moves to the
+adult flow at 18, and a girl/woman who is pregnant or recently gave birth is
+moved to the maternal flow. Saying a new screening phrase discards any
+half-finished screening. Shared code for the two newer flows is in
+`src/screeningShared.js`.
+
 ## Test
 
 Send a WhatsApp message to +265 886 29 53 24 asking a nutrition question —
