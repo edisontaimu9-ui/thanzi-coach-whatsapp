@@ -285,6 +285,12 @@ export function detectLabelRequest(text) {
 // text (see detectDriRequest). When no age is stated, a representative
 // default is used and flagged in the reply rather than silently presented
 // as exact.
+// Sample prompt for the greeting list's iron row. It names a person ("a woman") on purpose: a bare
+// "how much iron do I need" is declined by detectDriRequest (no age or sex to look up), falls through to
+// general retrieval, and comes back as an unrelated adolescent-only answer. This one resolves straight
+// to the DRI table (test/detectors.test.js checks it does).
+export const IRON_NEEDS_SAMPLE_PROMPT = "How much iron does a woman need?";
+
 export const DRI_NUTRIENT_KEYWORDS = {
   iron: "iron_mg",
   calcium: "calcium_mg",

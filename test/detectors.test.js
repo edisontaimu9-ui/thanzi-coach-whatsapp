@@ -13,6 +13,7 @@ import {
   detectDrugInteractionQuery,
   detectLabelRequest,
   detectDriRequest,
+  IRON_NEEDS_SAMPLE_PROMPT,
   detectComparisonFollowUp,
   detectMealPlanEdit,
 } from "../src/detectors.js";
@@ -230,6 +231,14 @@ describe("detectDriRequest", () => {
 
   test("declines to guess when neither age nor sex is given", () => {
     assert.equal(detectDriRequest("how much iron do I need"), null);
+  });
+
+  test("the greeting-list iron prompt resolves straight to the DRI table (a bare 'how much iron do I need' does not)", () => {
+    const req = detectDriRequest(IRON_NEEDS_SAMPLE_PROMPT);
+    assert.ok(req, "sample prompt must be answerable from the DRI table");
+    assert.equal(req.nutrientKey, "iron_mg");
+    assert.equal(req.sex, "female");
+    assert.equal(detectDriRequest("How much iron do I need?"), null);
   });
 
   test("resolves pregnancy to female + a reproductive-age default", () => {
