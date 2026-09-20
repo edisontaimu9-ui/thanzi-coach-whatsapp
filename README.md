@@ -103,6 +103,27 @@ moved to the maternal flow. Saying a new screening phrase discards any
 half-finished screening. Shared code for the two newer flows is in
 `src/screeningShared.js`.
 
+**Height estimate for a patient who can't be measured standing** (say
+"estimate height for a patient" or "patient can't stand" — not in the
+greeting list, which is already at WhatsApp's 10-row cap): the bot asks sex
+and age, then which ONE measurement is available, offering only the methods
+with a published equation at that age:
+
+- knee height (ages 6+, plus race — black/white only) — `stature_from_knee_height`
+  (Lee & Nieman), returns a standard error;
+- demi span (ages 16+, sternal notch to the middle/ring finger web, arm out
+  horizontally) — `stature_from_demi_span` (Gibson), no standard error given;
+- ulna/forearm length (any age, table covers 18.5–32cm) — `stature_from_ulna_length`,
+  a lookup table with no standard error, only a note on the one known
+  doubtful table cell (men >65, 30.0cm).
+
+Unlike the weight estimate, only one equation runs per session — a health
+worker normally has exactly one of these measurements available for a given
+patient. This is a standalone calculator: its result is never used for
+malnutrition classification (the adult screening flow has its own, narrower
+ulna-only height estimate that feeds into a BMI — see `src/adultScreening.js`).
+See `src/heightEstimate.js`.
+
 ## Test
 
 Send a WhatsApp message to +265 886 29 53 24 asking a nutrition question —

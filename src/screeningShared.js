@@ -30,6 +30,7 @@ export const ALL_SCREENING_SESSION_KINDS = [
   "school_age_screening",
   "adult_screening",
   "weight_estimate", // not a screening flow, but a fresh trigger for any flow should also discard a stale weight-estimate session
+  "height_estimate", // not a screening flow, but a fresh trigger for any flow should also discard a stale height-estimate session
 ];
 
 // ── D1 session helpers ──

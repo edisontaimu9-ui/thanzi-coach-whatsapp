@@ -84,6 +84,16 @@
  *      questions (as an explicit yes/no) to get a labelled BMI estimate. See
  *      ./weightEstimate.js.
  *
+ *  18. "estimate height for a patient" / "patient can't stand" ->
+ *      a multi-turn standing HEIGHT (stature) ESTIMATE for a patient who
+ *      can't be measured directly: asks which ONE measurement is on hand
+ *      (knee height + race, demi span, or ulna length — only the methods
+ *      that have a published equation at the patient's age are offered),
+ *      then calls the matching MCP tool: stature_from_knee_height,
+ *      stature_from_demi_span, or stature_from_ulna_length. Standalone
+ *      calculator — its result is never used for malnutrition
+ *      classification. See ./heightEstimate.js.
+ *
  * Required secrets (set with `wrangler secret put <NAME>` — never hardcode these):
  *   WHATSAPP_TOKEN         - Meta permanent/system-user access token
  *   VERIFY_TOKEN           - a string you invent; must match what you enter in
@@ -148,6 +158,7 @@ import { handlePregnantPostpartumScreeningFlow, detectPregnantPostpartumScreenin
 import { handleSchoolAgeScreeningFlow, detectSchoolAgeScreeningTrigger } from "./schoolAgeScreening.js";
 import { handleAdultScreeningFlow, detectAdultScreeningTrigger } from "./adultScreening.js";
 import { handleWeightEstimateFlow, detectWeightEstimateTrigger, WEIGHT_ESTIMATE_SAMPLE_PROMPT } from "./weightEstimate.js";
+import { handleHeightEstimateFlow, detectHeightEstimateTrigger } from "./heightEstimate.js";
 import { clearAllScreeningSessions } from "./screeningShared.js";
 import {
   SCREENING_MENU_ROW_ID,
@@ -371,6 +382,7 @@ async function handleTextMessage(userText, from, env, ctx) {
     detectPregnantPostpartumScreeningTrigger(userText) ||
     detectAdultScreeningTrigger(userText) ||
     detectWeightEstimateTrigger(userText) ||
+    detectHeightEstimateTrigger(userText) ||
     detectScreeningMenuRequest(userText)
   ) {
     await clearAllScreeningSessions(from, env);
@@ -413,6 +425,14 @@ async function handleTextMessage(userText, from, env, ctx) {
   const weightEstimateReply = await handleWeightEstimateFlow(userText, from, env);
   if (weightEstimateReply !== null) {
     await sendWhatsAppReply(from, weightEstimateReply, env);
+    return;
+  }
+
+  // Height (stature) estimate for a patient who can't be measured directly — see ./heightEstimate.js.
+  // Also a standalone calculator: its result is never used for malnutrition classification.
+  const heightEstimateReply = await handleHeightEstimateFlow(userText, from, env);
+  if (heightEstimateReply !== null) {
+    await sendWhatsAppReply(from, heightEstimateReply, env);
     return;
   }
 
@@ -2592,6 +2612,8 @@ const PROMPT_EXAMPLES_EN = [
   { id: WEIGHT_NUTRITION_SAMPLE_PROMPT, title: "Nutrition by Weight" },
   { id: SCREENING_MENU_ROW_ID, title: "Malnutrition Screening" },
   { id: WEIGHT_ESTIMATE_SAMPLE_PROMPT, title: "Estimate Weight" }, // 10th and last row: WhatsApp lists allow at most 10
+  // Height estimate (./heightEstimate.js, "estimate height for a patient") is NOT added here: this
+  // list is already at the 10-row WhatsApp cap. It's reachable by typing the trigger phrase directly.
 ];
 
 const PROMPT_EXAMPLES_NY = [
