@@ -72,6 +72,17 @@ In the adult flow, if the person was weighed but not measured standing (bedridde
 frail), the bot offers one extra question — ULNA length in cm — and the result is
 clearly labelled as based on an estimated height.
 
+If the adult result comes back **severe or moderate**, the bot also offers a
+follow-up: ASPEN refeeding syndrome risk (Table 3), calling
+`aspen_refeeding_risk_adult`. BMI is carried over from the screen just run;
+two more questions (caloric intake pattern, prefeeding electrolyte
+abnormality) are asked as a 1/2/3 choice — the two criteria ASPEN's own tool
+description calls a "clinician's qualitative read," which is why this stays
+a screening follow-up rather than a public quick calculator (it has no
+trigger phrase of its own and isn't in the Quick Calculators menu below).
+Adult-only by design — for severe pediatric malnutrition, national protocol
+should decide, not this bot. See `src/adultRefeedingRisk.js`.
+
 The flows hand people to each other from what they are told: "screen a child"
 moves to the 5–17 flow when the age is 5 or more, the 5–17 flow moves to the
 adult flow at 18, and a girl/woman who is pregnant or recently gave birth is

@@ -240,6 +240,62 @@ describe("handleAdultScreeningFlow — end to end with a fake env", () => {
       must: { weight_loss_band: "gt_10_percent", acute_disease_no_intake_over_5_days: true },
     });
     assert.match(final, /Adult Malnutrition Screening Result/);
+    assert.match(final, /ASPEN refeeding syndrome risk/); // severe result -> the refeeding-risk follow-up is offered
+    assert.equal(env._rows.size, 1);
+    assert.ok(env._rows.has(`${from}:adult_refeeding_risk`));
+  });
+
+  test("a moderate result also offers the refeeding-risk follow-up", async () => {
+    const env = makeFakeEnv(sampleResult({ nacs_classification: { population: "x", overallMalnutritionClassification: "moderate", indicators: [] } }));
+    const from = "265888200010";
+    const say = (t) => handleAdultScreeningFlow(t, from, env);
+    await say("screen an adult for malnutrition");
+    await say("man");
+    await say("45 years");
+    await say("60");
+    await say("170");
+    await say("skip"); // muac
+    await say("skip"); // edema
+    await say("skip"); // weight loss
+    await say("skip"); // context -> must_gate (bmi possible)
+    const final = await say("no"); // decline MUST -> finish
+    assert.match(final, /ASPEN refeeding syndrome risk/);
+    assert.ok(env._rows.has(`${from}:adult_refeeding_risk`));
+  });
+
+  test("a normal result does NOT offer the refeeding-risk follow-up", async () => {
+    const env = makeFakeEnv(sampleResult({ nacs_classification: { population: "x", overallMalnutritionClassification: "normal", indicators: [] } }));
+    const from = "265888200011";
+    const say = (t) => handleAdultScreeningFlow(t, from, env);
+    await say("screen an adult for malnutrition");
+    await say("man");
+    await say("45 years");
+    await say("60");
+    await say("170");
+    await say("skip");
+    await say("skip");
+    await say("skip");
+    await say("skip");
+    const final = await say("no");
+    assert.doesNotMatch(final, /ASPEN refeeding syndrome risk/);
+    assert.equal(env._rows.size, 0);
+  });
+
+  test("overweight/obesity results also do NOT offer the refeeding-risk follow-up", async () => {
+    const env = makeFakeEnv(sampleResult({ nacs_classification: { population: "x", overallMalnutritionClassification: "obesity", indicators: [] } }));
+    const from = "265888200012";
+    const say = (t) => handleAdultScreeningFlow(t, from, env);
+    await say("screen an adult for malnutrition");
+    await say("man");
+    await say("45 years");
+    await say("60");
+    await say("170");
+    await say("skip");
+    await say("skip");
+    await say("skip");
+    await say("skip");
+    const final = await say("no");
+    assert.doesNotMatch(final, /ASPEN refeeding syndrome risk/);
     assert.equal(env._rows.size, 0);
   });
 

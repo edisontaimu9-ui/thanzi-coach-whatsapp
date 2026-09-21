@@ -40,6 +40,13 @@
  * (This file must not import schoolAgeScreening.js — that file imports this
  * one, and the import graph is kept one-directional.)
  *
+ * REFEEDING RISK FOLLOW-UP: when the result is severe or moderate, the reply also opens
+ * (via beginAdultRefeedingRisk in ./adultRefeedingRisk.js) a short opt-in follow-up that
+ * calls aspen_refeeding_risk_adult (ASPEN Table 3). That follow-up has no free-text trigger
+ * of its own — it exists only as this hand-off, since 2 of its 3 questions need a health
+ * worker's own clinical judgement (recent intake, prefeeding electrolytes), not something
+ * to expose to the public as a standalone calculator.
+ *
  * Session kind: "adult_screening".
  */
 
@@ -66,6 +73,7 @@ import {
   NARRATION_RULES,
 } from "./screeningShared.js";
 import { beginPregnantPostpartumScreening } from "./pregnantPostpartumScreening.js";
+import { beginAdultRefeedingRisk } from "./adultRefeedingRisk.js";
 import {
   applyReply as applyWeightEstimateReply,
   nextStep as nextWeightEstimateStep,
@@ -491,7 +499,16 @@ export async function handleAdultScreeningFlow(userText, from, env) {
 
   try {
     const screenResult = await callMcpTool("adult_integrated_screen", buildScreenArgs(data), env);
-    return await explainAdultScreeningResult(screenResult, env);
+    const explained = await explainAdultScreeningResult(screenResult, env);
+    // Refeeding syndrome risk needs a health worker's own judgement (recent intake, prefeeding
+    // electrolytes) — offer it as a follow-up only when it's actually relevant, right after a
+    // severe/moderate result, rather than exposing it as a public standalone calculator.
+    const severity = screenResult.nacs_classification?.overallMalnutritionClassification;
+    if (severity === "severe" || severity === "moderate") {
+      const offer = await beginAdultRefeedingRisk(from, env, { bmi: screenResult.measurements?.bmi, severity });
+      return `${explained}\n\n${offer}`;
+    }
+    return explained;
   } catch (err) {
     console.error("adult_integrated_screen call failed:", err);
     return `Sorry, the screening tool couldn't complete: ${err instanceof Error ? err.message : String(err)}. Please try again in a moment.`;

@@ -33,6 +33,7 @@ export const ALL_SCREENING_SESSION_KINDS = [
   "height_estimate", // not a screening flow, but a fresh trigger for any flow should also discard a stale height-estimate session
   "bmi_check", // not a screening flow — quick BMI calculator
   "weight_change_check", // not a screening flow — quick percent weight change calculator
+  "adult_refeeding_risk", // not a screening flow — follow-up offered after a severe/moderate adult screen, no free trigger of its own
 ];
 
 // ── D1 session helpers ──

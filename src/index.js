@@ -73,7 +73,19 @@
  *      adult_integrated_screen tool. See ./adultScreening.js. The flows hand
  *      people to each other by age/pregnancy (see each file's header). Both
  *      reuse CHAKUDYA_MCP / CHAKUDYA_MCP_AUTH_TOKEN; shared plumbing is in
- *      ./screeningShared.js.
+ *      ./screeningShared.js. A severe/moderate result also opens the
+ *      follow-up in ./adultRefeedingRisk.js — see #16a.
+ *
+ *  16a. Follow-up only, no trigger of its own: after a severe/moderate #16
+ *      result, offers (yes/no) an ASPEN refeeding syndrome risk check for
+ *      the same adult (Table 3), calling aspen_refeeding_risk_adult. BMI is
+ *      carried over from the #16 result; caloric intake pattern and
+ *      prefeeding electrolyte abnormality are asked as a 3-option choice —
+ *      the two criteria ASPEN's own tool description calls a "clinician's
+ *      qualitative read," which is why this stays a screening follow-up
+ *      rather than a public quick calculator. Adult-only by design: for
+ *      severe pediatric malnutrition, national protocol should decide, not
+ *      this bot. See ./adultRefeedingRisk.js.
  *
  *  17. "estimate weight for a patient" / "patient can't be weighed" ->
  *      a multi-turn body-weight ESTIMATE for a patient who can't be weighed
@@ -178,6 +190,7 @@ import { handleUnder5ScreeningFlow, detectUnder5ScreeningTrigger } from "./under
 import { handlePregnantPostpartumScreeningFlow, detectPregnantPostpartumScreeningTrigger } from "./pregnantPostpartumScreening.js";
 import { handleSchoolAgeScreeningFlow, detectSchoolAgeScreeningTrigger } from "./schoolAgeScreening.js";
 import { handleAdultScreeningFlow, detectAdultScreeningTrigger } from "./adultScreening.js";
+import { handleAdultRefeedingRiskFlow } from "./adultRefeedingRisk.js";
 import { handleWeightEstimateFlow, detectWeightEstimateTrigger } from "./weightEstimate.js";
 import { handleHeightEstimateFlow, detectHeightEstimateTrigger } from "./heightEstimate.js";
 import { handleBmiCheckFlow, detectBmiCheckTrigger } from "./bmiCheck.js";
@@ -450,6 +463,15 @@ async function handleTextMessage(userText, from, env, ctx) {
   const adultScreeningReply = await handleAdultScreeningFlow(userText, from, env);
   if (adultScreeningReply !== null) {
     await sendWhatsAppReply(from, adultScreeningReply, env);
+    return;
+  }
+
+  // ASPEN refeeding syndrome risk follow-up, offered automatically after a severe/moderate adult
+  // result above — see ./adultRefeedingRisk.js. No free-text trigger of its own: returns null
+  // immediately unless that offer already started a session for this number.
+  const refeedingRiskReply = await handleAdultRefeedingRiskFlow(userText, from, env);
+  if (refeedingRiskReply !== null) {
+    await sendWhatsAppReply(from, refeedingRiskReply, env);
     return;
   }
 
