@@ -94,13 +94,26 @@
  *      calculator — its result is never used for malnutrition
  *      classification. See ./heightEstimate.js.
  *
- *  19. "estimate a patient" / "estimate weight or height" (with neither
- *      named), or tapping the greeting list's "Estimate Patient" row ->
- *      a tappable sub-menu offering #17 (weight) or #18 (height), the same
- *      way the "Malnutrition screening" row opens a who-to-screen menu.
- *      Exists because the greeting list is already at WhatsApp's 10-row
- *      cap, so #17 and #18 share one row instead of each needing their
- *      own. See ./estimateMenu.js.
+ *  19. "quick calculators" (none of the four below named), or tapping the
+ *      greeting list's "Quick Calculators" row ->
+ *      a tappable sub-menu offering #17 (weight), #18 (height), #20 (BMI)
+ *      or #21 (weight change), the same way the "Malnutrition screening"
+ *      row opens a who-to-screen menu. Exists because the greeting list is
+ *      already at WhatsApp's 10-row cap, so all four share one row instead
+ *      of each needing their own. See ./estimateMenu.js.
+ *
+ *  20. "check my BMI" / "BMI for a patient" ->
+ *      a quick two-question BMI calculator (weight, height) calling
+ *      bmi_classification — returns BMI plus BOTH the WHO 2000 band (with
+ *      comorbidity risk) and the Malawi NCST 2015 band for the same value.
+ *      Not attached to any screening; flags a note when the height suggests
+ *      a child, since these bands are adult-oriented. See ./bmiCheck.js.
+ *
+ *  21. "check percent weight change" / "how much weight did I lose" ->
+ *      a quick calculator (current weight, usual/baseline weight, optional
+ *      time frame) calling percent_weight_change_calculator. When a time
+ *      frame is given, also returns the significant/severe weight-loss
+ *      interpretation (Width & Reinhard) for it. See ./weightChangeCheck.js.
  *
  * Required secrets (set with `wrangler secret put <NAME>` — never hardcode these):
  *   WHATSAPP_TOKEN         - Meta permanent/system-user access token
@@ -167,6 +180,8 @@ import { handleSchoolAgeScreeningFlow, detectSchoolAgeScreeningTrigger } from ".
 import { handleAdultScreeningFlow, detectAdultScreeningTrigger } from "./adultScreening.js";
 import { handleWeightEstimateFlow, detectWeightEstimateTrigger } from "./weightEstimate.js";
 import { handleHeightEstimateFlow, detectHeightEstimateTrigger } from "./heightEstimate.js";
+import { handleBmiCheckFlow, detectBmiCheckTrigger } from "./bmiCheck.js";
+import { handleWeightChangeFlow, detectWeightChangeTrigger } from "./weightChangeCheck.js";
 import { clearAllScreeningSessions } from "./screeningShared.js";
 import {
   SCREENING_MENU_ROW_ID,
@@ -398,6 +413,8 @@ async function handleTextMessage(userText, from, env, ctx) {
     detectAdultScreeningTrigger(userText) ||
     detectWeightEstimateTrigger(userText) ||
     detectHeightEstimateTrigger(userText) ||
+    detectBmiCheckTrigger(userText) ||
+    detectWeightChangeTrigger(userText) ||
     detectEstimateMenuRequest(userText) ||
     detectScreeningMenuRequest(userText)
   ) {
@@ -452,8 +469,24 @@ async function handleTextMessage(userText, from, env, ctx) {
     return;
   }
 
-  // "estimate a patient" with neither weight nor height named (typed, or tapped from the greeting
-  // list's "Estimate Patient" row): show the tappable weight-or-height menu. See ./estimateMenu.js.
+  // Quick BMI check (weight + height -> WHO 2000 / Malawi NCST 2015 classification), with no
+  // screening attached — see ./bmiCheck.js.
+  const bmiCheckReply = await handleBmiCheckFlow(userText, from, env);
+  if (bmiCheckReply !== null) {
+    await sendWhatsAppReply(from, bmiCheckReply, env);
+    return;
+  }
+
+  // Quick percent weight change check (current + usual weight, optional time frame) — see
+  // ./weightChangeCheck.js.
+  const weightChangeReply = await handleWeightChangeFlow(userText, from, env);
+  if (weightChangeReply !== null) {
+    await sendWhatsAppReply(from, weightChangeReply, env);
+    return;
+  }
+
+  // "quick calculators" with none of the four named (typed, or tapped from the greeting list's
+  // "Quick calculators" row): show the tappable which-calculator menu. See ./estimateMenu.js.
   if (detectEstimateMenuRequest(userText)) {
     await sendWhatsAppInteractiveList(
       from,
@@ -2638,7 +2671,7 @@ const PROMPT_EXAMPLES_EN = [
   { id: "Quinoa", title: "Look Up Any Food" },
   { id: WEIGHT_NUTRITION_SAMPLE_PROMPT, title: "Nutrition by Weight" },
   { id: SCREENING_MENU_ROW_ID, title: "Malnutrition Screening" },
-  { id: ESTIMATE_MENU_ROW_ID, title: "Estimate Patient" }, // opens a weight/height sub-menu — see ./estimateMenu.js
+  { id: ESTIMATE_MENU_ROW_ID, title: "Quick Calculators" }, // opens a weight/height/BMI/weight-change sub-menu — see ./estimateMenu.js
 ];
 
 const PROMPT_EXAMPLES_NY = [
@@ -2650,7 +2683,7 @@ const PROMPT_EXAMPLES_NY = [
   { id: "Quinoa", title: "Funsani Chakudya" },
   { id: WEIGHT_NUTRITION_SAMPLE_PROMPT, title: "Kulemera kwa Chakudya" },
   { id: SCREENING_MENU_ROW_ID, title: "Kuyeza Malnutrition" },
-  { id: ESTIMATE_MENU_ROW_ID, title: "Estimate Patient" },
+  { id: ESTIMATE_MENU_ROW_ID, title: "Quick Calculators" },
 ];
 
 async function sendPromptList(to, lang, env) {

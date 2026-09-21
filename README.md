@@ -79,15 +79,15 @@ moved to the maternal flow. Saying a new screening phrase discards any
 half-finished screening. Shared code for the two newer flows is in
 `src/screeningShared.js`.
 
-## Weight / height estimate flows
+## Quick calculators
 
-Two standalone calculators for a patient who can't be weighed or measured
-directly — their results are never used for malnutrition classification
-(the adult screening flow above has its own, narrower ulna-only height
-estimate that does feed into a BMI). Tap **Estimate Patient** in the
-greeting list to open a weight-or-height picker (`src/estimateMenu.js`,
-say "estimate a patient" to open it by typing), or go straight to either
-flow by name:
+Four standalone calculators for a patient who can't be weighed or measured
+directly, or for a quick BMI or weight-change check outside a full screen —
+none of their results are ever used for malnutrition classification (the
+adult screening flow above has its own, narrower ulna-only height estimate
+and its own BMI, computed as part of that flow). Tap **Quick Calculators**
+in the greeting list to open a picker (`src/estimateMenu.js`, say "quick
+calculators" to open it by typing), or go straight to any flow by name:
 
 **Weight estimate** (ages 6 and up) — say "estimate weight for a patient" or
 "patient can't be weighed". The bot asks sex, age and arm circumference, then:
@@ -130,6 +130,24 @@ patient. This is a standalone calculator: its result is never used for
 malnutrition classification (the adult screening flow has its own, narrower
 ulna-only height estimate that feeds into a BMI — see `src/adultScreening.js`).
 See `src/heightEstimate.js`.
+
+**BMI check** — say "check my BMI" or "BMI for a patient". A quick
+two-question calculator (weight in kg, height in cm) that calls
+`bmi_classification`, returning the BMI plus BOTH the WHO 2000 band (with a
+comorbidity risk level) and the Malawi NCST 2015 band for the same value,
+since the two use different cut-offs. Not attached to any screening — if the
+height suggests a child, the reply adds a note pointing to the under-5/school
+screening flows instead, since these bands are adult-oriented. See
+`src/bmiCheck.js`.
+
+**Percent weight change** — say "check percent weight change" or "how much
+weight did I lose". A quick calculator (current weight, usual/baseline
+weight, and an optional time frame) that calls
+`percent_weight_change_calculator`: % change = [(usual − current) / usual] ×
+100, positive = loss. Reply *skip* to the time-frame question to get just the
+percent change; give a time frame (1 week/1 month/3 months/6 months) to also
+get the significant/severe weight-loss interpretation (Width & Reinhard) for
+it, in the same call. See `src/weightChangeCheck.js`.
 
 ## Test
 

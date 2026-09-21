@@ -11,12 +11,16 @@ import {
 } from "../src/estimateMenu.js";
 import { detectWeightEstimateTrigger, WEIGHT_ESTIMATE_SAMPLE_PROMPT } from "../src/weightEstimate.js";
 import { detectHeightEstimateTrigger, HEIGHT_ESTIMATE_SAMPLE_PROMPT } from "../src/heightEstimate.js";
+import { detectBmiCheckTrigger, BMI_CHECK_SAMPLE_PROMPT } from "../src/bmiCheck.js";
+import { detectWeightChangeTrigger, WEIGHT_CHANGE_SAMPLE_PROMPT } from "../src/weightChangeCheck.js";
 import { detectScreeningMenuRequest } from "../src/screeningMenu.js";
 
-// Same order index.js dispatches in: weight, then height.
+// Same order index.js dispatches in: weight, height, bmi, weight change.
 function firstFlow(text) {
   if (detectWeightEstimateTrigger(text)) return "weight";
   if (detectHeightEstimateTrigger(text)) return "height";
+  if (detectBmiCheckTrigger(text)) return "bmi";
+  if (detectWeightChangeTrigger(text)) return "weight_change";
   return null;
 }
 
@@ -28,17 +32,19 @@ describe("each menu row starts exactly its own flow", () => {
     });
   }
 
-  test("both flows are covered, once each, using the flows' own sample prompts", () => {
-    assert.deepEqual(ESTIMATE_MENU_ROWS.map((r) => r.flow).sort(), ["height", "weight"]);
+  test("all four flows are covered, once each, using the flows' own sample prompts", () => {
+    assert.deepEqual(ESTIMATE_MENU_ROWS.map((r) => r.flow).sort(), ["bmi", "height", "weight", "weight_change"]);
     assert.equal(ESTIMATE_MENU_ROWS.find((r) => r.flow === "weight").id, WEIGHT_ESTIMATE_SAMPLE_PROMPT);
     assert.equal(ESTIMATE_MENU_ROWS.find((r) => r.flow === "height").id, HEIGHT_ESTIMATE_SAMPLE_PROMPT);
+    assert.equal(ESTIMATE_MENU_ROWS.find((r) => r.flow === "bmi").id, BMI_CHECK_SAMPLE_PROMPT);
+    assert.equal(ESTIMATE_MENU_ROWS.find((r) => r.flow === "weight_change").id, WEIGHT_CHANGE_SAMPLE_PROMPT);
   });
 });
 
 describe("WhatsApp list limits", () => {
   test("row ids are unique and within 200 chars; titles <= 24; descriptions <= 72", () => {
     const ids = new Set();
-    for (const r of [...ESTIMATE_MENU_ROWS, { id: ESTIMATE_MENU_ROW_ID, title: "Estimate Patient" }]) {
+    for (const r of [...ESTIMATE_MENU_ROWS, { id: ESTIMATE_MENU_ROW_ID, title: "Quick Calculators" }]) {
       assert.ok(r.id.length <= 200, r.id);
       assert.ok(r.title.length <= 24, `${r.title} (${r.title.length})`);
       if (r.description) assert.ok(r.description.length <= 72, r.description);
@@ -64,18 +70,19 @@ describe("WhatsApp list limits", () => {
 });
 
 describe("detectEstimateMenuRequest", () => {
-  test("accepts the greeting-list row id and plain requests to estimate, without naming weight or height", () => {
+  test("accepts the greeting-list row id and plain requests, without naming which calculator", () => {
     for (const t of [
       ESTIMATE_MENU_ROW_ID,
+      "quick calculators",
+      "Quick calculators!",
+      "quick calculator",
+      "calculators",
       "estimate a patient",
-      "Estimate a patient!",
       "estimate the patient",
       "estimate patient",
       "estimate patient's measurements",
       "please estimate a patient",
-      "estimate measurements",
-      "estimate measurements for a patient",
-      "  estimate a patient  ",
+      "  quick calculators  ",
     ]) assert.equal(detectEstimateMenuRequest(t), true, t);
   });
 
@@ -85,14 +92,25 @@ describe("detectEstimateMenuRequest", () => {
     }
   });
 
-  test("does not fire for anything that already names weight or height — those go straight to their own flow", () => {
-    for (const t of [WEIGHT_ESTIMATE_SAMPLE_PROMPT, HEIGHT_ESTIMATE_SAMPLE_PROMPT, "estimate weight for a patient", "estimate height for a patient", "patient can't stand", "patient can't be weighed"]) {
+  test("does not fire for anything that already names weight, height, BMI or weight change — those go straight to their own flow", () => {
+    for (const t of [
+      WEIGHT_ESTIMATE_SAMPLE_PROMPT,
+      HEIGHT_ESTIMATE_SAMPLE_PROMPT,
+      BMI_CHECK_SAMPLE_PROMPT,
+      WEIGHT_CHANGE_SAMPLE_PROMPT,
+      "estimate weight for a patient",
+      "estimate height for a patient",
+      "patient can't stand",
+      "patient can't be weighed",
+      "check my BMI",
+      "check percent weight change",
+    ]) {
       assert.notEqual(firstFlow(t), null, t);
       assert.equal(detectEstimateMenuRequest(t), false, t);
     }
   });
 
-  test("the greeting-list row id does not start either estimate flow (it only opens the menu)", () => {
+  test("the greeting-list row id does not start any of the four flows (it only opens the menu)", () => {
     assert.equal(firstFlow(ESTIMATE_MENU_ROW_ID), null);
   });
 
