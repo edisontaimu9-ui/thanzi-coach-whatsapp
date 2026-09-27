@@ -1,20 +1,20 @@
 # Thanzi Coach — WhatsApp Bridge
 
-Bridges the +265 886 29 53 24 WhatsApp Business number (Meta Cloud API) to
-your Chakudya API `/rag/ask` endpoint.
+Bridges a WhatsApp Business number (Meta Cloud API) to a
+nutrition RAG API's `/rag/ask` endpoint.
 
 ## Before pushing — fill in one thing
 
-`CHAKUDYA_API_URL` is already set to `https://chakudya-api.edisontaimu9.workers.dev`
-and the `/rag/ask` request/response shapes match `openapi.json` exactly (public,
-no API key needed). You only need to set, in `wrangler.toml`:
+`CHAKUDYA_API_URL` is already configured, and the `/rag/ask` request/response
+shapes match `openapi.json` exactly (public, no API key needed). You only need
+to set, in `wrangler.toml`:
 
 - `PHONE_NUMBER_ID` — from Meta App Dashboard > WhatsApp > API Setup
 
-## Deploy — via GitHub Actions (wrangler doesn't run in Termux)
+## Deploy — via GitHub Actions
 
 This repo deploys itself on every push to `main` via
-`.github/workflows/deploy.yml`. You never run wrangler locally.
+`.github/workflows/deploy.yml`. You never need to run wrangler locally.
 
 One-time setup, in the GitHub repo (Settings > Secrets and variables > Actions
 > New repository secret):
@@ -28,10 +28,9 @@ One-time setup, in the GitHub repo (Settings > Secrets and variables > Actions
 Once those three secrets exist, every `git push` to `main` deploys the
 Worker and pushes the two Worker secrets automatically.
 
-## Push from Termux
+## Push to deploy
 
 ```bash
-cd ~/thanzi-coach-whatsapp
 git add .
 git commit -m "Add GitHub Actions deploy workflow"
 git push
@@ -162,11 +161,10 @@ it, in the same call. See `src/weightChangeCheck.js`.
 
 ## Test
 
-Send a WhatsApp message to the configured Business number asking a nutrition question —
-it should route through Chakudya's RAG and reply in the chat.
+Send a WhatsApp message to the configured Business number asking a nutrition
+question — it should route through the RAG API and reply in the chat.
 
 ## Watch logs
 
 Cloudflare dashboard > Workers & Pages > thanzi-coach-whatsapp > Logs
-(real-time `wrangler tail` isn't available without local wrangler, but the
-dashboard's live log view covers the same need).
+(the dashboard's live log view covers real-time monitoring).
