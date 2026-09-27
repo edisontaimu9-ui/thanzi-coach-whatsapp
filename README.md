@@ -162,7 +162,7 @@ it, in the same call. See `src/weightChangeCheck.js`.
 
 ## Test
 
-Send a WhatsApp message to +265 886 29 53 24 asking a nutrition question —
+Send a WhatsApp message to the configured Business number asking a nutrition question —
 it should route through Chakudya's RAG and reply in the chat.
 
 ## Watch logs
