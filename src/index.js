@@ -1062,10 +1062,10 @@ async function compareFoodsViaChakudya(foodNames, env) {
   for (const food of data.foods) {
     const p = food.per_100g || {};
     const macros = [];
-    if (p.energy_kcal != null) macros.push(`${p.energy_kcal} kcal`);
-    if (p.protein_g != null) macros.push(`${p.protein_g}g protein`);
-    if (p.carbs_g != null) macros.push(`${p.carbs_g}g carbs`);
-    if (p.fat_g != null) macros.push(`${p.fat_g}g fat`);
+    if (p.energy_kcal != null) macros.push(`${roundNutrient(p.energy_kcal)} kcal`);
+    if (p.protein_g != null) macros.push(`${roundNutrient(p.protein_g)}g protein`);
+    if (p.carbs_g != null) macros.push(`${roundNutrient(p.carbs_g)}g carbs`);
+    if (p.fat_g != null) macros.push(`${roundNutrient(p.fat_g)}g fat`);
     lines.push(`\n*${food.food_name}* — ${macros.join(", ") || "no macro data"}`);
     if (food.glycaemic?.entries?.length) {
       const gi = food.glycaemic.entries[0];
@@ -1112,7 +1112,7 @@ async function compareFoodsViaChakudya(foodNames, env) {
       const wider = widerResults[i];
       const widerName = wider ? getFoodItemName(wider) : null;
       if (!widerName || normalizeFoodName(widerName) === normalizeFoodName(f.food_name)) return;
-      const kcal = wider.energy_kcal ?? wider.kcal;
+      const kcal = roundNutrient(wider.energy_kcal ?? wider.kcal);
       altLines.push(
         `• "${f.requested_as}" matched *${f.food_name}* locally — ${sourceLabel(wider.source)} also has ` +
           `*${widerName}*${kcal != null ? ` (${kcal} kcal/100g)` : ""}. Ask about it by name if that's what you meant.`
@@ -2140,6 +2140,15 @@ async function lookupBarcode(barcode, env) {
   return text ? { item, text } : null;
 }
 
+// Round a nutrient value to at most 2 decimal places for display. Chakudya
+// sometimes returns long repeating decimals (e.g. from scaling a label's
+// per-serving values to per-100g, like 100/28 = 3.571428571...), which look
+// broken in a WhatsApp message. Non-numbers pass through unchanged.
+function roundNutrient(n) {
+  if (typeof n !== "number" || !isFinite(n)) return n;
+  return Math.round(n * 100) / 100;
+}
+
 // Formats a Food/PackagedFood/external-lookup result (field names vary by
 // source) into a short WhatsApp-friendly card.
 function formatFoodResult(item) {
@@ -2155,10 +2164,10 @@ function formatFoodResult(item) {
   // to that instead of silently omitting the amount.
   const measure = item.measure || item.raw_data?.quantity || "100 g";
   const measureText = ` — ${measure}`;
-  const kcal = item.kcal ?? item.energy_kcal;
-  const protein = item.protein_g;
-  const carbs = item.carbs_g;
-  const fat = item.fat_g;
+  const kcal = roundNutrient(item.kcal ?? item.energy_kcal);
+  const protein = roundNutrient(item.protein_g);
+  const carbs = roundNutrient(item.carbs_g);
+  const fat = roundNutrient(item.fat_g);
   // The "necessary micros" — the full WHO/Malawi-priority micronutrient
   // panel (see sql/001_add_micronutrients_to_foods.sql on the Chakudya
   // side) rather than the raw FCT panel. Each only shows up here if the
@@ -2166,19 +2175,19 @@ function formatFoodResult(item) {
   // fiber/sodium/potassium/calcium/iron stays a short card, while a
   // packaged-food label scan that captured the full panel shows all of it —
   // useful as an on-the-spot confirmation of what got captured/submitted.
-  const fiber = item.fiber_g;
-  const sodium = item.sodium_mg;
-  const potassium = item.potassium_mg;
-  const calcium = item.calcium_mg;
-  const iron = item.iron_mg;
-  const zinc = item.zinc_mg;
-  const magnesium = item.magnesium_mg;
-  const folate = item.folate_mcg;
-  const vitaminA = item.vita_rae_mcg;
-  const vitaminC = item.vitc_mg;
-  const vitaminD = item.vitd_mcg;
-  const vitaminB12 = item.vitb12_mcg;
-  const iodine = item.iodine_mcg;
+  const fiber = roundNutrient(item.fiber_g);
+  const sodium = roundNutrient(item.sodium_mg);
+  const potassium = roundNutrient(item.potassium_mg);
+  const calcium = roundNutrient(item.calcium_mg);
+  const iron = roundNutrient(item.iron_mg);
+  const zinc = roundNutrient(item.zinc_mg);
+  const magnesium = roundNutrient(item.magnesium_mg);
+  const folate = roundNutrient(item.folate_mcg);
+  const vitaminA = roundNutrient(item.vita_rae_mcg);
+  const vitaminC = roundNutrient(item.vitc_mg);
+  const vitaminD = roundNutrient(item.vitd_mcg);
+  const vitaminB12 = roundNutrient(item.vitb12_mcg);
+  const iodine = roundNutrient(item.iodine_mcg);
 
   const macros = [];
   if (kcal != null) macros.push(`${kcal} kcal`);
@@ -2235,7 +2244,7 @@ function formatSubstitutes(data) {
   const lines = [`*Substitutes for ${data.original.food_name}* (${data.substitution_group})`];
   for (const s of data.substitutes || []) {
     const p = s.per_100g || {};
-    lines.push(`• ${s.food_name} — ${p.kcal ?? "?"} kcal, ${p.protein_g ?? "?"}g protein per 100g`);
+    lines.push(`• ${s.food_name} — ${roundNutrient(p.kcal) ?? "?"} kcal, ${roundNutrient(p.protein_g) ?? "?"}g protein per 100g`);
   }
   if (!data.substitutes?.length) lines.push("No close nutritional matches found in the local database.");
   if (data.note) lines.push(`\n_${data.note}_`);
@@ -2307,20 +2316,20 @@ function formatNutritionLabel(label, foodName) {
     `*Nutrition Label — ${foodName}*`,
     `Serving: ${label.serving_size} (${label.serving_grams}g)`,
   ];
-  if (label.calories != null) lines.push(`Calories: ${label.calories} kcal`);
-  if (label.total_fat_g != null) lines.push(`Total Fat: ${label.total_fat_g}g`);
-  if (label.saturated_fat_g != null) lines.push(`  Saturated Fat: ${label.saturated_fat_g}g`);
-  if (label.carbohydrates_g != null) lines.push(`Carbohydrates: ${label.carbohydrates_g}g`);
-  if (label.fiber_g != null) lines.push(`  Fiber: ${label.fiber_g}g`);
-  if (label.sugars_g != null) lines.push(`  Sugars: ${label.sugars_g}g`);
-  if (label.protein_g != null) lines.push(`Protein: ${label.protein_g}g`);
-  if (label.sodium_mg != null) lines.push(`Sodium: ${label.sodium_mg}mg`);
+  if (label.calories != null) lines.push(`Calories: ${roundNutrient(label.calories)} kcal`);
+  if (label.total_fat_g != null) lines.push(`Total Fat: ${roundNutrient(label.total_fat_g)}g`);
+  if (label.saturated_fat_g != null) lines.push(`  Saturated Fat: ${roundNutrient(label.saturated_fat_g)}g`);
+  if (label.carbohydrates_g != null) lines.push(`Carbohydrates: ${roundNutrient(label.carbohydrates_g)}g`);
+  if (label.fiber_g != null) lines.push(`  Fiber: ${roundNutrient(label.fiber_g)}g`);
+  if (label.sugars_g != null) lines.push(`  Sugars: ${roundNutrient(label.sugars_g)}g`);
+  if (label.protein_g != null) lines.push(`Protein: ${roundNutrient(label.protein_g)}g`);
+  if (label.sodium_mg != null) lines.push(`Sodium: ${roundNutrient(label.sodium_mg)}mg`);
 
   const vm = Object.entries(label.vitamins_minerals || {});
   if (vm.length) {
     lines.push("");
     lines.push("Vitamins & Minerals:");
-    for (const [name, val] of vm) lines.push(`  ${name}: ${val}`);
+    for (const [name, val] of vm) lines.push(`  ${name}: ${roundNutrient(val)}`);
   }
   if (label.missing_fields?.length) {
     lines.push(`\n_Not on file for this food: ${label.missing_fields.join(", ")}._`);
