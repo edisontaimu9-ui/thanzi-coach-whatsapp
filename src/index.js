@@ -2711,7 +2711,7 @@ const PROMPT_EXAMPLES_NY = [
 async function sendPromptList(to, lang, env) {
   const isEnglish = lang === "en";
   const body = isEnglish
-    ? "Hi there! 👋 I'm Thanzi Coach. Tap an example below, or just type your own question anytime. You can also send a barcode number or a photo of a nutrition label."
+    ? "Hi there! 👋 I'm Thanzi Coach. I can answer nutrition questions, screen for malnutrition, run quick calculators (BMI, weight/height estimate), and read a barcode or nutrition label photo. Tap an example below, or just type your own question anytime."
     : "Muli bwanji! 👋 Ndine Thanzi Coach. Sankhani chitsanzo pansipa, kapena lembani funso lanu nthawi ina iliyonse. Mutha kutumizanso barcode kapena chithunzi cha nutrition label.";
   const buttonText = isEnglish ? "See examples" : "Onani zitsanzo";
   const sectionTitle = isEnglish ? "Try asking" : "Yesani kufunsa";
