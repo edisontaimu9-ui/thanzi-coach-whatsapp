@@ -6,6 +6,8 @@ import {
   looksLikeBarcode,
   looksLikeBareFoodName,
   detectGreetingLanguage,
+  parseGreeting,
+  isGenericHelpRequest,
   detectFoodComparison,
   detectMultiFoodList,
   detectFoodQuantity,
@@ -59,6 +61,51 @@ describe("detectGreetingLanguage", () => {
   test("returns null for anything else", () => {
     assert.equal(detectGreetingLanguage("how much iron do I need"), null);
     assert.equal(detectGreetingLanguage("nsima"), null);
+  });
+});
+
+describe("parseGreeting (flexible openers)", () => {
+  test("bare greetings and greeting + filler show the menu", () => {
+    for (const t of ["hi", "Hello Thanzi!", "hi there", "Good morning Thanzi Coach", "hello everyone"]) {
+      assert.deepEqual(parseGreeting(t), { lang: "en", rest: "" }, t);
+    }
+    assert.deepEqual(parseGreeting("Moni bwanji"), { lang: "ny", rest: "" });
+  });
+
+  test("generic help requests (with or without a greeting) show the menu", () => {
+    for (const t of [
+      "I want help on Thanzi",
+      "hi, I want help on thanzi",
+      "good morning, I need help with nutrition",
+      "Can you help me?",
+      "what can you do",
+      "how do I use this bot",
+      "help",
+      "menu",
+    ]) {
+      assert.deepEqual(parseGreeting(t), { lang: "en", rest: "" }, t);
+    }
+    assert.deepEqual(parseGreeting("moni, ndikufuna thandizo"), { lang: "ny", rest: "" });
+    assert.deepEqual(parseGreeting("thandizo"), { lang: "ny", rest: "" });
+  });
+
+  test("a real question after a greeting is passed through with the greeting stripped", () => {
+    assert.equal(parseGreeting("hi how much iron do I need").rest, "how much iron do I need");
+    assert.equal(parseGreeting("Hello, what foods are high in iron?").rest, "what foods are high in iron?");
+    assert.equal(parseGreeting("Hey! compare nsima and rice").rest, "compare nsima and rice");
+    assert.equal(parseGreeting("hi Thanzi, interactions with warfarin").rest, "interactions with warfarin");
+    assert.equal(parseGreeting("thanks, substitute for nsima").rest, "substitute for nsima");
+  });
+
+  test("non-greetings and words that merely start with a greeting are left alone", () => {
+    for (const t of ["high protein foods", "hiv nutrition", "yoghurt", "nsima", "Quinoa", "12", "yes", "how much iron do I need"]) {
+      assert.equal(parseGreeting(t), null, t);
+    }
+  });
+
+  test("isGenericHelpRequest does not swallow real topics", () => {
+    assert.equal(isGenericHelpRequest("help with diabetes diet"), false);
+    assert.equal(isGenericHelpRequest("I want help on Thanzi"), true);
   });
 });
 

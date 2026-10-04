@@ -170,6 +170,7 @@ import {
   looksLikeBarcode,
   looksLikeBareFoodName,
   detectGreetingLanguage,
+  parseGreeting,
   detectFoodComparison,
   detectMultiFoodList,
   detectFoodQuantity,
@@ -410,6 +411,14 @@ async function handleIncomingMessage(request, env, ctx) {
 // in ./detectors.js.
 
 async function handleTextMessage(userText, from, env, ctx) {
+  // Flexible openers: "hello Thanzi, how much iron do I need" -> answer the question with the
+  // greeting stripped. (A bare greeting / generic help request is handled further down, after the
+  // in-progress flow handlers, so a mid-flow answer is never swallowed.) See parseGreeting.
+  const openingParse = parseGreeting(userText);
+  if (openingParse && openingParse.rest) {
+    userText = openingParse.rest;
+  }
+
   // Under-5 malnutrition screening: multi-turn structured intake (see
   // ./under5Screening.js). Checked first, both to continue an in-progress
   // session (a bare "12" or "yes" mid-flow must never be swallowed by
@@ -529,9 +538,11 @@ async function handleTextMessage(userText, from, env, ctx) {
     return;
   }
 
-  const greetingLang = detectGreetingLanguage(userText);
-  if (greetingLang) {
-    await sendPromptList(from, greetingLang, env);
+  // Bare greeting ("hi", "good morning Thanzi") or a generic "I want help on Thanzi" with no topic:
+  // show the tappable menu. Anything with a real question after the greeting was stripped above.
+  const greeting = parseGreeting(userText);
+  if (greeting && !greeting.rest) {
+    await sendPromptList(from, greeting.lang, env);
     return;
   }
 
@@ -2720,8 +2731,8 @@ const PROMPT_EXAMPLES_NY = [
 async function sendPromptList(to, lang, env) {
   const isEnglish = lang === "en";
   const body = isEnglish
-    ? "Hi there! 👋 I'm Thanzi Coach. I can answer nutrition questions, screen for malnutrition, run quick calculators (BMI, weight/height estimate), and read a barcode or nutrition label photo. Tap an example below, or just type your own question anytime."
-    : "Muli bwanji! 👋 Ndine Thanzi Coach. Sankhani chitsanzo pansipa, kapena lembani funso lanu nthawi ina iliyonse. Mutha kutumizanso barcode kapena chithunzi cha nutrition label.";
+    ? "Hi there! 👋 I'm Thanzi Coach. I can answer nutrition questions, screen for malnutrition, run quick calculators (BMI, weight/height estimate), and read a barcode or nutrition label photo. Tap an example below, or just type whatever you need — any question, any way you like."
+    : "Muli bwanji! 👋 Ndine Thanzi Coach. Sankhani chitsanzo pansipa, kapena lembani funso lanu lililonse nthawi ina iliyonse. Mutha kutumizanso barcode kapena chithunzi cha nutrition label.";
   const buttonText = isEnglish ? "See examples" : "Onani zitsanzo";
   const sectionTitle = isEnglish ? "Try asking" : "Yesani kufunsa";
   const examples = isEnglish ? PROMPT_EXAMPLES_EN : PROMPT_EXAMPLES_NY;

@@ -56,10 +56,107 @@ export const CHICHEWA_GREETINGS = [
 ];
 
 // Returns "en", "ny", or null (not a recognized greeting at all).
+// Strict whole-message match, kept for backwards compatibility. Prefer parseGreeting() below,
+// which is the flexible version the webhook actually uses.
 export function detectGreetingLanguage(text) {
   const t = text.trim().toLowerCase().replace(/[!?.,]+$/g, "");
   if (ENGLISH_GREETINGS.includes(t)) return "en";
   if (CHICHEWA_GREETINGS.includes(t)) return "ny";
+  return null;
+}
+
+// ── Flexible greeting / "I want help" handling ──
+// Anyone can open a chat any way they like: "hi", "hello Thanzi", "good morning, I want help on
+// Thanzi", "moni, ndikufuna thandizo", "hi how much iron do I need". A greeting may be followed by
+// filler, a generic help request (-> show the tappable menu), or a real question (-> greeting is
+// stripped and the question is answered normally). No message is ever refused for how it starts.
+
+// Extra opener words on top of the exact-match lists above. Longest first so "good morning" wins over "good".
+const GREETING_OPENERS = [
+  ...ENGLISH_GREETINGS.map((g) => ({ g: g.replace(/\?$/, ""), lang: "en" })),
+  ...["greetings", "howdy", "hullo", "morning", "afternoon", "evening", "good night", "hi there", "hello there", "hey there", "thank you very much", "thanks a lot", "many thanks"].map((g) => ({ g, lang: "en" })),
+  ...CHICHEWA_GREETINGS.map((g) => ({ g, lang: "ny" })),
+  ...["mwaswera bwanji", "mwadzuka bwanji", "salaam", "zikomo kwambiri", "zikomo zambiri"].map((g) => ({ g, lang: "ny" })),
+].sort((a, b) => b.g.length - a.g.length);
+
+const OPENER_RE = GREETING_OPENERS.map(({ g, lang }) => ({
+  lang,
+  re: new RegExp("^" + g.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+") + "(?=$|[\\s,!.?:;\\-])", "i"),
+}));
+
+// Words that can trail a greeting without being part of the actual question.
+const FILLER_LEAD_RE = /^(?:there|everyone|everybody|all|team|sir|madam|bwana|boss|friend|please|plz|chonde|bwanji|kwambiri|zambiri|bot|and|,|!|\.|-)+(?=$|[\s,!.?:;-])\s*/i;
+
+// A generic "I need help / how do I use this" with no actual topic: show the menu instead of
+// sending "I want help" to nutrition search.
+const THANZI_NAME = "(?:the\\s+)?(?:thanzi(?:\\s+coach)?|this\\s+(?:bot|app|service|chat|number)|you|nutrition|health|something|anything)";
+const GENERIC_HELP_EN = new RegExp(
+  "^(?:" +
+    "(?:i\\s+)?(?:want|need|would\\s+like|'d\\s+like|am\\s+looking\\s+for)\\s+(?:some\\s+)?(?:help|assistance|support|info(?:rmation)?|advice)(?:\\s+(?:on|with|about|from|using|regarding))?(?:\\s+" + THANZI_NAME + ")?" +
+    "|(?:please\\s+)?(?:help|assist)(?:\\s+me)?(?:\\s+(?:on|with|about))?(?:\\s+" + THANZI_NAME + ")?" +
+    "|(?:can|could|will|would)\\s+you\\s+(?:please\\s+)?(?:help|assist)(?:\\s+me)?(?:\\s+(?:on|with|about))?(?:\\s+" + THANZI_NAME + ")?" +
+    "|(?:can|may|could)\\s+i\\s+ask(?:\\s+you)?(?:\\s+(?:a|some)?\\s*(?:question|questions|something|anything))?" +
+    "|i\\s+(?:have|got)\\s+(?:a|some)\\s+questions?(?:\\s+(?:on|about)\\s+" + THANZI_NAME + ")?" +
+    "|i\\s+want\\s+to\\s+ask(?:\\s+(?:a|some)?\\s*(?:question|questions|something))?" +
+    "|(?:what|how)\\s+can\\s+you\\s+(?:do|help(?:\\s+me)?(?:\\s+with)?)" +
+    "|what\\s+do\\s+you\\s+do|who\\s+are\\s+you|what\\s+is\\s+" + THANZI_NAME + "|what'?s\\s+" + THANZI_NAME +
+    "|how\\s+(?:do|can)\\s+i\\s+(?:use|start|begin)(?:\\s+" + THANZI_NAME + ")?" +
+    "|how\\s+does\\s+(?:this|" + THANZI_NAME + ")\\s+work" +
+    "|(?:start|begin|menu|options|commands|examples|help|info|about|thanzi(?:\\s+coach)?)" +
+  ")$",
+  "i"
+);
+const GENERIC_HELP_NY = /^(?:ndi(?:ku)?funa\s+thandizo|ndithandizeni|thandizo|ndi(?:kuf|f)una\s+kufunsa(?:\s+funso)?|ndili\s+ndi\s+(?:funso|mafunso)|mungandithandize)(?:\s+(?:pa|ndi|za|pa\s+za)\s+(?:thanzi(?:\s+coach)?|zakudya))?$/i;
+
+function normalizeForHelp(t) {
+  return t.trim().toLowerCase().replace(/[’`]/g, "'").replace(/[!?.,;:]+$/g, "").replace(/\s+/g, " ");
+}
+
+/** True when the whole message is a generic "I need help / what can you do" with no real topic. */
+export function isGenericHelpRequest(text) {
+  const t = normalizeForHelp(text);
+  if (!t) return false;
+  return GENERIC_HELP_EN.test(t) || GENERIC_HELP_NY.test(t);
+}
+
+/**
+ * Parses a message that may open with a greeting and/or a generic help request.
+ * Returns null when it is neither (leave the message alone), else { lang, rest }:
+ *   rest === ""  -> nothing but a greeting/help request: show the tappable prompt list
+ *   rest !== ""  -> a real question followed the greeting: answer `rest` (greeting stripped)
+ */
+export function parseGreeting(text) {
+  const raw = (text || "").trim();
+  if (!raw) return null;
+
+  // 1. Exact legacy greetings ("hi", "moni", "how are you?", "thanks").
+  const exact = detectGreetingLanguage(raw);
+  if (exact) return { lang: exact, rest: "" };
+
+  // 2. Greeting prefix, optionally followed by filler / a generic help request / a real question.
+  for (const { lang, re } of OPENER_RE) {
+    const m = raw.match(re);
+    if (!m) continue;
+    let rest = raw.slice(m[0].length).replace(/^[\s,!.?:;-]+/, "");
+    // "hi Thanzi, ..." / "hello Thanzi Coach! ..." — a name directly after the greeting, then punctuation.
+    rest = rest.replace(/^thanzi(?:\s+coach)?\s*[,!.:;-]+\s*/i, "");
+    // "hi there", "moni bwanji", "hello everyone"
+    let prev;
+    do {
+      prev = rest;
+      rest = rest.replace(FILLER_LEAD_RE, "").replace(/^[\s,!.?:;-]+/, "");
+    } while (rest !== prev && rest);
+    rest = rest.trim();
+    const restLang = lang;
+    if (!rest || /^thanzi(?:\s+coach)?$/i.test(rest) || isGenericHelpRequest(rest)) {
+      return { lang: restLang, rest: "" };
+    }
+    return { lang: restLang, rest };
+  }
+
+  // 3. No greeting, but a generic help/start request ("I want help on Thanzi", "thandizo").
+  if (GENERIC_HELP_NY.test(normalizeForHelp(raw))) return { lang: "ny", rest: "" };
+  if (GENERIC_HELP_EN.test(normalizeForHelp(raw))) return { lang: "en", rest: "" };
   return null;
 }
 
