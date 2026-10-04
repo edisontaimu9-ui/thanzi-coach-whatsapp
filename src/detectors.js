@@ -95,6 +95,9 @@ const GENERIC_HELP_EN = new RegExp(
     "(?:i\\s+)?(?:want|need|would\\s+like|'d\\s+like|am\\s+looking\\s+for)\\s+(?:some\\s+)?(?:help|assistance|support|info(?:rmation)?|advice)(?:\\s+(?:on|with|about|from|using|regarding))?(?:\\s+" + THANZI_NAME + ")?" +
     "|(?:please\\s+)?(?:help|assist)(?:\\s+me)?(?:\\s+(?:on|with|about))?(?:\\s+" + THANZI_NAME + ")?" +
     "|(?:can|could|will|would)\\s+you\\s+(?:please\\s+)?(?:help|assist)(?:\\s+me)?(?:\\s+(?:on|with|about))?(?:\\s+" + THANZI_NAME + ")?" +
+    "|(?:can|may|could|do)\\s+(?:i|we)\\s+(?:please\\s+)?(?:get|have|receive|find)\\s+(?:some\\s+|any\\s+|a\\s+little\\s+|a\\s+bit\\s+of\\s+)?(?:help|assistance|support|advice|info(?:rmation)?)(?:\\s+(?:on|with|about|from|here|please)(?:\\s+" + THANZI_NAME + ")?)?" +
+    "|(?:i\\s+(?:am\\s+|'m\\s+)?(?:in\\s+need\\s+of|needing|wanting)|(?:get|any|some)\\s+me)\\s+(?:some\\s+)?(?:help|assistance|support|advice)(?:\\s+(?:on|with|about)\\s+" + THANZI_NAME + ")?" +
+    "|help\\s+(?:please|me\\s+please|needed|here)" +
     "|(?:can|may|could)\\s+i\\s+ask(?:\\s+you)?(?:\\s+(?:a|some)?\\s*(?:question|questions|something|anything))?" +
     "|i\\s+(?:have|got)\\s+(?:a|some)\\s+questions?(?:\\s+(?:on|about)\\s+" + THANZI_NAME + ")?" +
     "|i\\s+want\\s+to\\s+ask(?:\\s+(?:a|some)?\\s*(?:question|questions|something))?" +
@@ -109,7 +112,7 @@ const GENERIC_HELP_EN = new RegExp(
 const GENERIC_HELP_NY = /^(?:ndi(?:ku)?funa\s+thandizo|ndithandizeni|thandizo|ndi(?:kuf|f)una\s+kufunsa(?:\s+funso)?|ndili\s+ndi\s+(?:funso|mafunso)|mungandithandize)(?:\s+(?:pa|ndi|za|pa\s+za)\s+(?:thanzi(?:\s+coach)?|zakudya))?$/i;
 
 function normalizeForHelp(t) {
-  return t.trim().toLowerCase().replace(/[’`]/g, "'").replace(/[!?.,;:]+$/g, "").replace(/\s+/g, " ");
+  return t.trim().toLowerCase().replace(/[’`]/g, "'").replace(/[!?.,;:]+$/g, "").replace(/[,\s]+(?:please|plz|pls|chonde)$/g, "").replace(/^(?:please|plz|pls|chonde)[,\s]+/g, "").replace(/\s+/g, " ");
 }
 
 /** True when the whole message is a generic "I need help / what can you do" with no real topic. */
