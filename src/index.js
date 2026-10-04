@@ -165,7 +165,8 @@
  */
 
 import { verifyWebhookSignature } from "./webhookSignature.js";
-import { classifyFailure, buildFailureReply } from "./fallbackReplies.js";
+import { classifyFailure, buildFailureReply, looksChichewa } from "./fallbackReplies.js";
+import { getLimits, checkRateLimit, pruneRateLimits, buildRateLimitNotice } from "./rateLimit.js";
 import { shouldClassifyIntent, buildIntentMessages, parseIntentResponse } from "./intentClassifier.js";
 import zxingReaderWasmModule from "zxing-wasm/dist/reader/zxing_reader.wasm";
 import { prepareZXingModule, readBarcodes } from "zxing-wasm/reader";
@@ -301,6 +302,7 @@ export default {
   // path — no separate notification channel to build or maintain.
   async scheduled(event, env, ctx) {
     ctx.waitUntil(sendDailySummary(env));
+    ctx.waitUntil(pruneRateLimits(env.DB));
   },
 };
 
@@ -363,6 +365,19 @@ async function handleIncomingMessage(request, env, ctx) {
   }
 
   const from = message.from; // sender's WhatsApp number
+
+  // Per-number rate limit (see ./rateLimit.js): drops excess messages BEFORE any Groq/Chakudya work,
+  // with one polite notice per window. The admin number is exempt. Fails open if D1 is unavailable.
+  if (!env.ADMIN_PHONE || from !== env.ADMIN_PHONE) {
+    const limit = await checkRateLimit(env.DB, from, getLimits(env));
+    if (limit.limited) {
+      if (limit.notify) {
+        const said = message.text?.body || "";
+        await sendWhatsAppReply(from, buildRateLimitNotice(limit.scope, looksChichewa(said)), env).catch(() => {});
+      }
+      return new Response("OK", { status: 200 });
+    }
+  }
 
   // Mark the message read and show WhatsApp's native "typing..." indicator
   // right away — every text/image/audio handler below can take a few
