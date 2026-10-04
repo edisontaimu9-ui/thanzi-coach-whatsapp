@@ -164,6 +164,7 @@
  *   -> 429 rate limited, with Retry-After header
  */
 
+import { verifyWebhookSignature } from "./webhookSignature.js";
 import zxingReaderWasmModule from "zxing-wasm/dist/reader/zxing_reader.wasm";
 import { prepareZXingModule, readBarcodes } from "zxing-wasm/reader";
 import {
@@ -315,9 +316,27 @@ function handleVerification(url, env) {
 
 // --- Step 2-4: incoming message -> Chakudya RAG -> reply ---
 async function handleIncomingMessage(request, env, ctx) {
+  // Read the RAW body once: Meta's X-Hub-Signature-256 is computed over the exact bytes sent, so
+  // it must be verified before (and independently of) JSON parsing. See ./webhookSignature.js.
+  const rawBody = await request.text();
+
+  // Rejects forged POSTs (anyone who finds the worker URL could otherwise spoof messages and burn
+  // Groq/Chakudya quota). Needs the Meta App Secret as the APP_SECRET Worker secret. Until that
+  // secret is set the check is skipped with a warning, so deploying this code can't take the bot
+  // down; once APP_SECRET exists, unsigned or wrongly signed requests get 401.
+  if (env.APP_SECRET) {
+    const ok = await verifyWebhookSignature(rawBody, request.headers.get("X-Hub-Signature-256"), env.APP_SECRET);
+    if (!ok) {
+      console.warn("Rejected webhook POST: missing or invalid X-Hub-Signature-256");
+      return new Response("Unauthorized", { status: 401 });
+    }
+  } else {
+    console.warn("APP_SECRET is not set: webhook signature verification is DISABLED");
+  }
+
   let body;
   try {
-    body = await request.json();
+    body = JSON.parse(rawBody);
   } catch {
     return new Response("Bad request", { status: 400 });
   }
