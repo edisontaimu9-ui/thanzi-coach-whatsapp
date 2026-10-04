@@ -165,6 +165,7 @@
  */
 
 import { verifyWebhookSignature } from "./webhookSignature.js";
+import { classifyFailure, buildFailureReply } from "./fallbackReplies.js";
 import { shouldClassifyIntent, buildIntentMessages, parseIntentResponse } from "./intentClassifier.js";
 import zxingReaderWasmModule from "zxing-wasm/dist/reader/zxing_reader.wasm";
 import { prepareZXingModule, readBarcodes } from "zxing-wasm/reader";
@@ -410,9 +411,10 @@ async function handleIncomingMessage(request, env, ctx) {
   } catch (err) {
     console.error("Thanzi Coach error:", err);
     ctx.waitUntil(recordError(from, err, env));
-    const reply = isSubrequestLimitError(err)
-      ? SUBREQUEST_LIMIT_MESSAGE
-      : "Sorry, something went wrong. Please try again in a few minutes. 🙏";
+    // Tell the person what happened and what to do next (busy / question too big / other), echo
+    // their question so they can resend it, and point to "menu". See ./fallbackReplies.js.
+    const failedText = message.text?.body || message.interactive?.list_reply?.id || message.interactive?.button_reply?.id || "";
+    const reply = buildFailureReply(classifyFailure(err), failedText);
     await sendWhatsAppReply(from, reply, env).catch(() => {}); // best-effort; don't crash the webhook ack
   }
 
@@ -986,7 +988,11 @@ async function handleTextMessage(userText, from, env, ctx) {
     }
   }
 
-  const answer = await askChakudya(userText, from, env);
+  let answer = await askChakudya(userText, from, env);
+  // askChakudya returns these two canned strings (instead of throwing) when the provider is down,
+  // rate-limited, or the question blew the subrequest ceiling: swap in the more helpful reply.
+  if (answer === LLM_BUSY_MESSAGE) answer = buildFailureReply("busy", userText);
+  else if (answer === SUBREQUEST_LIMIT_MESSAGE) answer = buildFailureReply("limit", userText);
   await sendWhatsAppReply(from, answer, env);
 }
 
