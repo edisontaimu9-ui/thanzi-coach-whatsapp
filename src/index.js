@@ -165,6 +165,7 @@
  */
 
 import { verifyWebhookSignature } from "./webhookSignature.js";
+import { shouldClassifyIntent, buildIntentMessages, parseIntentResponse } from "./intentClassifier.js";
 import zxingReaderWasmModule from "zxing-wasm/dist/reader/zxing_reader.wasm";
 import { prepareZXingModule, readBarcodes } from "zxing-wasm/reader";
 import {
@@ -973,9 +974,57 @@ async function handleTextMessage(userText, from, env, ctx) {
     }
   }
 
+  // Last stop before nutrition search: a short, help-shaped message the regex detectors missed
+  // ("could somebody assist me pls") gets one tiny LLM call to decide menu vs real question.
+  // Any failure returns "question", so this can only ever ADD the menu, never block an answer.
+  // See ./intentClassifier.js.
+  if (shouldClassifyIntent(userText)) {
+    const { intent, lang } = await classifyHelpIntent(userText, env);
+    if (intent === "menu") {
+      await sendPromptList(from, lang, env);
+      return;
+    }
+  }
 
   const answer = await askChakudya(userText, from, env);
   await sendWhatsAppReply(from, answer, env);
+}
+
+// One small, fast Groq call (no retry, short timeout) -> { intent: "menu"|"question", lang }.
+async function classifyHelpIntent(text, env) {
+  const fallback = { intent: "question", lang: "en" };
+  if (!env.GROQ_API_KEY) return fallback;
+  try {
+    const res = await fetchWithTimeout(
+      fetch,
+      "https://api.groq.com/openai/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${env.GROQ_API_KEY}`,
+        },
+        body: JSON.stringify({
+          model: "openai/gpt-oss-20b",
+          messages: buildIntentMessages(text),
+          temperature: 0,
+          max_completion_tokens: 200,
+          reasoning_effort: "low",
+          response_format: { type: "json_object" },
+        }),
+      },
+      4000
+    );
+    if (!res.ok) {
+      console.error("Intent classifier error:", res.status);
+      return fallback;
+    }
+    const body = await res.json();
+    return parseIntentResponse(body?.choices?.[0]?.message?.content);
+  } catch (err) {
+    console.error("Intent classifier failed:", err?.message || err);
+    return fallback;
+  }
 }
 
 // Detects a comparison request naming 2-6 foods (see detectFoodComparison
