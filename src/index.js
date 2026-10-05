@@ -170,7 +170,7 @@
 
 import { verifyWebhookSignature } from "./webhookSignature.js";
 import {
-  buildToEnglishMessages, buildToChichewaMessages, cleanTranslation,
+  isChichewaMessage, buildToEnglishMessages, buildToChichewaMessages, cleanTranslation,
   translationPreservesFacts, CHICHEWA_AI_NOTE, CHICHEWA_FALLBACK_NOTE,
 } from "./chichewa.js";
 import { normalizeIncomingMessage, buildEditNotice } from "./editedMessages.js";
@@ -494,7 +494,15 @@ async function handleIncomingMessage(request, env, ctx) {
 // the remembered language (see ./language.js). Used by the notice/feedback paths that don't already
 // hold the language state.
 async function isChichewaFor(env, from, text) {
+  if (!chichewaRepliesEnabled(env)) return false;
   return resolveLanguage(text, await getLanguageState(env.DB, from)) === "ny";
+}
+
+// Replies are pure English by default. Chichewa questions are still UNDERSTOOD (translated to
+// English before searching), but the bot only answers in Chichewa — menus, notices, buttons and
+// translated answers — when the Worker variable CHICHEWA_REPLIES is set to "on".
+function chichewaRepliesEnabled(env) {
+  return String(env.CHICHEWA_REPLIES || "").toLowerCase() === "on";
 }
 
 // `opts.learnLanguage` is true only for typed text: voice transcripts are forced to English and
@@ -511,15 +519,16 @@ async function handleTextMessage(userText, from, env, ctx, opts = {}) {
   // Remembered reply language (./language.js). "English" / "Chichewa" is an explicit, locked choice;
   // otherwise the language follows what the person has been writing, so short messages like
   // "nsima" or "yes" keep the conversation in the same language.
-  const langState = await getLanguageState(env.DB, from);
-  const langCommand = detectLanguageCommand(userText);
+  const repliesInChichewa = chichewaRepliesEnabled(env);
+  const langState = repliesInChichewa ? await getLanguageState(env.DB, from) : null;
+  const langCommand = repliesInChichewa ? detectLanguageCommand(userText) : null;
   if (langCommand) {
     await saveLanguageState(env.DB, from, { language: langCommand, locked: true, en_streak: 0 });
     await sendWhatsAppReply(from, languageConfirmation(langCommand), env);
     return;
   }
-  const lang = resolveLanguage(userText, langState);
-  if (opts.learnLanguage) ctx.waitUntil(learnLanguage(env.DB, from, langState, userText));
+  const lang = repliesInChichewa ? resolveLanguage(userText, langState) : "en";
+  if (opts.learnLanguage && repliesInChichewa) ctx.waitUntil(learnLanguage(env.DB, from, langState, userText));
 
   // Under-5 malnutrition screening: multi-turn structured intake (see
   // ./under5Screening.js). Checked first, both to continue an in-progress
@@ -644,7 +653,7 @@ async function handleTextMessage(userText, from, env, ctx, opts = {}) {
   // show the tappable menu. Anything with a real question after the greeting was stripped above.
   const greeting = parseGreeting(userText);
   if (greeting && !greeting.rest) {
-    const menuLang = langState?.locked ? langState.language : greeting.lang === "ny" ? "ny" : lang;
+    const menuLang = !repliesInChichewa ? "en" : langState?.locked ? langState.language : greeting.lang === "ny" ? "ny" : lang;
     await sendPromptList(from, menuLang, env);
     return;
   }
@@ -1064,7 +1073,7 @@ async function handleTextMessage(userText, from, env, ctx, opts = {}) {
   if (shouldClassifyIntent(userText)) {
     const { intent, lang: classifiedLang } = await classifyHelpIntent(userText, env);
     if (intent === "menu") {
-      const menuLang = langState?.locked ? langState.language : classifiedLang === "ny" ? "ny" : lang;
+      const menuLang = !repliesInChichewa ? "en" : langState?.locked ? langState.language : classifiedLang === "ny" ? "ny" : lang;
       await sendPromptList(from, menuLang, env);
       return;
     }
@@ -1072,9 +1081,9 @@ async function handleTextMessage(userText, from, env, ctx, opts = {}) {
 
   // Chichewa question (or Chichewa/English mix): search in English, then translate the answer
   // back. Every step falls back to English, never to a worse answer. See ./chichewa.js.
-  const inChichewa = lang === "ny";
+  const inChichewa = lang === "ny"; // reply in Chichewa (only when CHICHEWA_REPLIES is on)
   let searchText = userText;
-  if (inChichewa) {
+  if (isChichewaMessage(userText) || inChichewa) { // understanding the question always works
     const english = await translateWithGroq(buildToEnglishMessages(userText), env, 8000);
     if (english) searchText = english;
   }
