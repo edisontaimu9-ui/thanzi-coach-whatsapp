@@ -163,6 +163,20 @@ export function parseGreeting(text) {
   return null;
 }
 
+// ── Menu escape ──
+// Typed mid-flow ("menu" while a screening asks for MUAC) it must abandon the flow and show the menu
+// instead of being swallowed as an invalid answer. Exact whole-message match only, so real questions
+// ("help with a diabetic diet", "options for breakfast") are never hijacked.
+export function isMenuEscape(text) {
+  const t = String(text || "").trim().toLowerCase().replace(/[!?.,;:]+$/g, "").replace(/\s+/g, " ");
+  return /^(?:(?:main\s+|show\s+(?:me\s+)?(?:the\s+)?|back\s+to\s+(?:the\s+)?)?menu|home|start\s+(?:over|again)|restart|reset|options|help)$/.test(t);
+}
+
+/** A bare "cancel / stop / quit / exit" (used when no flow is active, to say there is nothing to cancel). */
+export function isBareCancel(text) {
+  return /^(?:cancel|stop|quit|exit)$/.test(String(text || "").trim().toLowerCase().replace(/[!?.,;:]+$/g, ""));
+}
+
 // A single-word item that's just a cooking/preparation state almost never
 // names its own separate food — it's describing whatever came right before
 // it. "rice, cooked" is ONE food ("rice, cooked" or "rice — cooked"), not

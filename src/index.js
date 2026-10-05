@@ -194,6 +194,8 @@ import {
   looksLikeBareFoodName,
   detectGreetingLanguage,
   parseGreeting,
+  isMenuEscape,
+  isBareCancel,
   detectFoodComparison,
   detectMultiFoodList,
   detectFoodQuantity,
@@ -530,6 +532,14 @@ async function handleTextMessage(userText, from, env, ctx, opts = {}) {
   const lang = repliesInChichewa ? resolveLanguage(userText, langState) : "en";
   if (opts.learnLanguage && repliesInChichewa) ctx.waitUntil(learnLanguage(env.DB, from, langState, userText));
 
+  // Menu escape: "menu" / "help" / "start over" abandon whatever guided flow is in progress and show
+  // the menu (otherwise a mid-flow "menu" is swallowed as an invalid answer). See isMenuEscape.
+  if (isMenuEscape(userText)) {
+    await clearAllScreeningSessions(from, env);
+    await sendPromptList(from, repliesInChichewa && lang === "ny" ? "ny" : "en", env);
+    return;
+  }
+
   // Under-5 malnutrition screening: multi-turn structured intake (see
   // ./under5Screening.js). Checked first, both to continue an in-progress
   // session (a bare "12" or "yes" mid-flow must never be swallowed by
@@ -651,6 +661,11 @@ async function handleTextMessage(userText, from, env, ctx, opts = {}) {
 
   // Bare greeting ("hi", "good morning Thanzi") or a generic "I want help on Thanzi" with no topic:
   // show the tappable menu. Anything with a real question after the greeting was stripped above.
+  if (isBareCancel(userText)) {
+    // Active flows handle their own "cancel" above; reaching here means nothing was in progress.
+    await sendWhatsAppReply(from, "There's nothing to cancel right now. Type *menu* to see what I can do. 🙏", env);
+    return;
+  }
   const greeting = parseGreeting(userText);
   if (greeting && !greeting.rest) {
     const menuLang = !repliesInChichewa ? "en" : langState?.locked ? langState.language : greeting.lang === "ny" ? "ny" : lang;

@@ -7,6 +7,8 @@ import {
   looksLikeBareFoodName,
   detectGreetingLanguage,
   parseGreeting,
+  isMenuEscape,
+  isBareCancel,
   isGenericHelpRequest,
   detectFoodComparison,
   detectMultiFoodList,
@@ -61,6 +63,21 @@ describe("detectGreetingLanguage", () => {
   test("returns null for anything else", () => {
     assert.equal(detectGreetingLanguage("how much iron do I need"), null);
     assert.equal(detectGreetingLanguage("nsima"), null);
+  });
+});
+
+describe("menu escape and bare cancel", () => {
+  test("menu-style words escape; real questions never do", () => {
+    for (const t of ["menu", "Menu!", "main menu", "show me the menu", "back to menu", "start over", "Start again", "restart", "reset", "home", "options", "help"]) {
+      assert.equal(isMenuEscape(t), true, t);
+    }
+    for (const t of ["help with a diabetic diet", "options for breakfast", "menu for diabetics", "reset my password", "nsima", "12", ""]) {
+      assert.equal(isMenuEscape(t), false, t);
+    }
+  });
+  test("bare cancel words", () => {
+    for (const t of ["cancel", "Stop", "quit!", "exit"]) assert.equal(isBareCancel(t), true, t);
+    for (const t of ["cancel my order", "don't stop", "stopping", ""]) assert.equal(isBareCancel(t), false, t);
   });
 });
 
