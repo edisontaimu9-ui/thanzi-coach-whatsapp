@@ -165,6 +165,7 @@
  */
 
 import { verifyWebhookSignature } from "./webhookSignature.js";
+import { normalizeIncomingMessage, buildEditNotice } from "./editedMessages.js";
 import { classifyFailure, buildFailureReply, looksChichewa } from "./fallbackReplies.js";
 import {
   parseFeedbackId, shouldAskFeedback, buildFeedbackPrompt, buildFeedbackThanks,
@@ -354,7 +355,7 @@ async function handleIncomingMessage(request, env, ctx) {
   // message content — ignore those and only act on real inbound text messages.
   const entry = body?.entry?.[0];
   const change = entry?.changes?.[0];
-  const message = change?.value?.messages?.[0];
+  let message = change?.value?.messages?.[0];
 
   if (!message) {
     return new Response("OK", { status: 200 }); // status callback, nothing to do
@@ -369,6 +370,12 @@ async function handleIncomingMessage(request, env, ctx) {
     return new Response("OK", { status: 200 });
   }
 
+  // Edited messages (see ./editedMessages.js): a readable text edit is rewritten as a normal text
+  // message so it is answered as a fresh question; the "unsupported" placeholder Meta currently
+  // sends for edits gets a plain explanation instead of silence.
+  const normalized = normalizeIncomingMessage(message);
+  message = normalized.message;
+
   const from = message.from; // sender's WhatsApp number
 
   // Per-number rate limit (see ./rateLimit.js): drops excess messages BEFORE any Groq/Chakudya work,
@@ -382,6 +389,15 @@ async function handleIncomingMessage(request, env, ctx) {
       }
       return new Response("OK", { status: 200 });
     }
+  }
+
+  if (normalized.kind === "unsupported" || normalized.kind === "edit-unreadable") {
+    await sendWhatsAppReply(from, buildEditNotice(normalized.kind), env).catch(() => {});
+    return new Response("OK", { status: 200 });
+  }
+  if (normalized.kind === "edit") {
+    // Sent before the typing indicator so the indicator stays up while the real answer is prepared.
+    await sendWhatsAppReply(from, buildEditNotice("edit", looksChichewa(message.text.body)), env).catch(() => {});
   }
 
   // Mark the message read and show WhatsApp's native "typing..." indicator
