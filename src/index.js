@@ -171,6 +171,7 @@ import {
   parseFeedbackId, shouldAskFeedback, buildFeedbackPrompt, buildFeedbackThanks,
   createFeedbackPrompt, recordFeedback, feedbackSummary, pruneFeedback,
   getAnswerForShare, buildShareText, buildShareUrl, buildShareMessage,
+  splitReferences, buildDetailsMessage,
 } from "./feedback.js";
 import { getLimits, checkRateLimit, pruneRateLimits, buildRateLimitNotice } from "./rateLimit.js";
 import { shouldClassifyIntent, buildIntentMessages, parseIntentResponse } from "./intentClassifier.js";
@@ -1040,26 +1041,48 @@ async function handleTextMessage(userText, from, env, ctx) {
     answer = buildFailureReply("limit", userText);
     isRealAnswer = false;
   }
-  await sendWhatsAppReply(from, answer, env);
-
-  // After a real answer, follow up with 👍/👎 buttons (cooldown-limited, best-effort, off the
-  // critical path). See ./feedback.js.
-  if (isRealAnswer && shouldAskFeedback(answer)) {
-    ctx.waitUntil(askForFeedback(from, userText, answer, env));
+  // Real answers: hide the References block behind a 📚 See details button and follow up with the
+  // 👍/👎 (+ details or 📤 Share) buttons. See ./feedback.js. Anything that isn't a substantive
+  // real answer (failure replies, one-liners) is sent exactly as before, references included.
+  const { main, references } = splitReferences(answer);
+  if (isRealAnswer && shouldAskFeedback(main)) {
+    await sendWhatsAppReply(from, main, env);
+    ctx.waitUntil(askForFeedback(from, userText, main, references, env));
+  } else {
+    await sendWhatsAppReply(from, answer, env);
   }
 }
 
-async function askForFeedback(from, question, answer, env) {
+// Follow-up buttons after an answer. Best-effort, but the hidden references must never be lost:
+// if the buttons can't be created or sent, the sources are sent as plain text instead.
+async function askForFeedback(from, question, answer, references, env) {
+  const isNy = looksChichewa(question);
   try {
-    const id = await createFeedbackPrompt(env.DB, { whatsappId: from, question, answer });
-    if (!id) return;
-    await sendWhatsAppInteractiveButtons(from, buildFeedbackPrompt(id, looksChichewa(question)), env);
+    const id = await createFeedbackPrompt(env.DB, { whatsappId: from, question, answer, sources: references });
+    if (!id) throw new Error("no feedback row");
+    await sendWhatsAppInteractiveButtons(from, buildFeedbackPrompt(id, isNy, Boolean(references)), env);
   } catch (err) {
     console.error("askForFeedback failed:", err);
+    if (references) {
+      await sendWhatsAppReply(from, `📚 *${isNy ? "Magwero" : "Sources"}*\n${references}`, env).catch(() => {});
+    }
   }
 }
 
 async function handleFeedbackTap({ rating, id }, from, env) {
+  if (rating === "details") {
+    // 📚 See details: reveal the hidden sources, with a 📤 Share link button underneath.
+    const stored = await getAnswerForShare(env.DB, { id, whatsappId: from });
+    if (!stored || !stored.sources) return;
+    const isNy = looksChichewa(stored.question);
+    const msg = buildDetailsMessage(stored.sources, isNy);
+    const url = buildShareUrl(buildShareText(stored.answer, env.BOT_WA_NUMBER));
+    await sendWhatsAppInteractiveCtaUrl(from, { body: msg.body, displayText: msg.displayText, url }, env).catch(async (err) => {
+      console.error("Details send failed:", err);
+      await sendWhatsAppReply(from, `📚 *${isNy ? "Magwero" : "Sources"}*\n${stored.sources}`, env).catch(() => {});
+    });
+    return;
+  }
   if (rating === "share") {
     // 📤 Share: reply with a link button that opens WhatsApp's chat picker with the answer
     // pre-filled (wa.me/?text=...). Optional BOT_WA_NUMBER (digits, e.g. 265...) adds a "chat with

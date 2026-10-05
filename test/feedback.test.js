@@ -2,7 +2,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import {
   buildFeedbackId, parseFeedbackId, shouldAskFeedback, buildFeedbackPrompt, buildFeedbackThanks,
-  buildShareText, buildShareUrl, buildShareMessage, getAnswerForShare,
+  buildShareText, buildShareUrl, buildShareMessage, getAnswerForShare, splitReferences, buildDetailsMessage,
   createFeedbackPrompt, recordFeedback, feedbackSummary, pruneFeedback, FEEDBACK_COOLDOWN_MS,
 } from "../src/feedback.js";
 
@@ -27,7 +27,7 @@ function fakeDb() {
           },
           async run() {
             if (/^INSERT/.test(sql)) {
-              const row = { id: nextId++, whatsapp_id: a[0], ts: a[1], question: a[2], answer: a[3], rating: null, rated_at: null };
+              const row = { id: nextId++, whatsapp_id: a[0], ts: a[1], question: a[2], answer: a[3], sources: a[4], rating: null, rated_at: null };
               rows.push(row);
               return { meta: { last_row_id: row.id } };
             }
@@ -71,6 +71,7 @@ describe("button ids", () => {
     assert.equal(buildFeedbackId("up", 42), "fb:up:42");
     assert.deepEqual(parseFeedbackId("fb:down:7"), { rating: "down", id: 7 });
     assert.deepEqual(parseFeedbackId("fb:share:9"), { rating: "share", id: 9 });
+    assert.deepEqual(parseFeedbackId("fb:details:11"), { rating: "details", id: 11 });
     assert.equal(buildFeedbackId("share", 9), "fb:share:9");
     for (const bad of ["fb:maybe:1", "fb:up:", "fb:up:abc", "hello", "", null, undefined, "fb:up:1 "]) {
       assert.equal(parseFeedbackId(bad), null, String(bad));
@@ -87,6 +88,17 @@ describe("prompt text", () => {
       assert.equal(parseFeedbackId(p.buttons[0].id).id, 5);
     }
   });
+  test("with hidden sources the first button is 📚 See details", () => {
+    const p = buildFeedbackPrompt(8, false, true);
+    assert.equal(p.buttons.length, 3);
+    assert.match(p.buttons[0].title, /See details/);
+    assert.equal(parseFeedbackId(p.buttons[0].id).rating, "details");
+    assert.deepEqual(p.buttons.slice(1).map((b) => parseFeedbackId(b.id).rating), ["up", "down"]);
+    assert.match(buildFeedbackPrompt(8, true, true).buttons[0].title, /Onani/);
+    for (const b of [...p.buttons, ...buildFeedbackPrompt(8, true, true).buttons]) assert.ok([...b.title].length <= 20, b.title);
+    // without sources, 📤 Share takes the third slot
+    assert.match(buildFeedbackPrompt(8).buttons[2].title, /Share/);
+  });
   test("thanks differs by rating and language", () => {
     assert.match(buildFeedbackThanks("up"), /Glad/);
     assert.match(buildFeedbackThanks("down"), /another way/);
@@ -100,15 +112,19 @@ describe("prompt text", () => {
 });
 
 describe("createFeedbackPrompt / recordFeedback", () => {
-  test("creates a row (truncated) and then respects the cooldown", async () => {
+  test("creates a row (truncated); every answer gets one unless a cooldown is requested", async () => {
     const db = fakeDb();
     const id = await createFeedbackPrompt(db, { whatsappId: "A", question: "q".repeat(500), answer: "a".repeat(900), nowMs: T0 });
     assert.equal(id, 1);
+    assert.equal(await createFeedbackPrompt(db, { whatsappId: "A", question: "q", answer: "a", nowMs: T0 + 1000 }), 2); // no cooldown by default
+    db.rows.length = 0;
+    assert.equal(await createFeedbackPrompt(db, { whatsappId: "A", question: "q".repeat(500), answer: "a".repeat(900), sources: "s".repeat(2000), nowMs: T0, cooldownMs: FEEDBACK_COOLDOWN_MS }), 3);
+    assert.equal(db.rows[0].sources.length, 800);
     assert.equal(db.rows[0].question.length, 200);
     assert.equal(db.rows[0].answer.length, 700);
-    assert.equal(await createFeedbackPrompt(db, { whatsappId: "A", question: "q", answer: "a", nowMs: T0 + 1000 }), null);
-    assert.equal(await createFeedbackPrompt(db, { whatsappId: "B", question: "q", answer: "a", nowMs: T0 + 1000 }), 2);
-    assert.equal(await createFeedbackPrompt(db, { whatsappId: "A", question: "q", answer: "a", nowMs: T0 + FEEDBACK_COOLDOWN_MS + 1000 }), 3);
+    assert.equal(await createFeedbackPrompt(db, { whatsappId: "A", question: "q", answer: "a", nowMs: T0 + 1000, cooldownMs: FEEDBACK_COOLDOWN_MS }), null);
+    assert.equal(await createFeedbackPrompt(db, { whatsappId: "B", question: "q", answer: "a", nowMs: T0 + 1000, cooldownMs: FEEDBACK_COOLDOWN_MS }), 4);
+    assert.equal(await createFeedbackPrompt(db, { whatsappId: "A", question: "q", answer: "a", nowMs: T0 + FEEDBACK_COOLDOWN_MS + 1000, cooldownMs: FEEDBACK_COOLDOWN_MS }), 5);
   });
 
   test("a tap records once, only for the owner", async () => {
@@ -171,6 +187,32 @@ describe("📤 Share", () => {
     assert.match((await getAnswerForShare(db, { id, whatsappId: "A" })).answer, /Iron-rich/);
     assert.equal(await getAnswerForShare(db, { id, whatsappId: "B" }), null);
     assert.equal(await getAnswerForShare({ prepare() { throw new Error("x"); } }, { id, whatsappId: "A" }), null);
+  });
+});
+
+describe("📚 See details", () => {
+  test("splitReferences separates the hidden References block", () => {
+    const a = "Iron is in beans [1].\n\n_References:_\n[1] Chakudya Malawi Ncst Guidelines 2017 Database";
+    assert.deepEqual(splitReferences(a), { main: "Iron is in beans [1].", references: "[1] Chakudya Malawi Ncst Guidelines 2017 Database" });
+    assert.deepEqual(splitReferences("Plain answer."), { main: "Plain answer.", references: "" });
+    assert.deepEqual(splitReferences(""), { main: "", references: "" });
+    assert.equal(splitReferences("Mentions references in passing, no block.").references, "");
+  });
+
+  test("details message holds the sources, fits WhatsApp's limits, in both languages", () => {
+    const m = buildDetailsMessage("[1] Chakudya Guidelines");
+    assert.match(m.body, /Sources/);
+    assert.match(m.body, /\[1\] Chakudya Guidelines/);
+    assert.ok([...m.displayText].length <= 20);
+    assert.match(buildDetailsMessage("[1] x", true).body, /Magwero/);
+    assert.ok(buildDetailsMessage("z".repeat(5000)).body.length <= 1024);
+  });
+
+  test("the stored sources come back through the owner-only lookup", async () => {
+    const db = fakeDb();
+    const id = await createFeedbackPrompt(db, { whatsappId: "A", question: "q", answer: "answer", sources: "[1] Src", nowMs: T0 });
+    assert.equal((await getAnswerForShare(db, { id, whatsappId: "A" })).sources, "[1] Src");
+    assert.equal(await getAnswerForShare(db, { id, whatsappId: "B" }), null);
   });
 });
 

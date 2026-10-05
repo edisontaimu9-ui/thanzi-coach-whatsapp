@@ -7,8 +7,8 @@
  * daily summary shows the counts and the latest 👎 questions, so you can see what to fix.
  *
  * Optional feature, so everything here is best-effort: any database problem means "don't ask" or
- * "don't record", never an error shown to the person. A per-person cooldown keeps it from nagging
- * during a rapid-fire Q&A.
+ * "don't record", never an error shown to the person. Every answer gets the buttons; an optional
+ * per-person cooldown (createFeedbackPrompt's cooldownMs) can thin them out.
  *
  * No fetch/env here (the WhatsApp send lives in src/index.js); unit-tested with a fake DB in
  * test/feedback.test.js.
@@ -16,19 +16,34 @@
 
 export const FEEDBACK_COOLDOWN_MS = 3 * 60 * 1000;
 export const FEEDBACK_RETENTION_DAYS = 30;
-const MIN_ANSWER_CHARS = 120; // don't ask about one-liners
+const MIN_ANSWER_CHARS = 40; // skip trivial one-liners; everything else gets the action buttons
 const MAX_QUESTION_CHARS = 200;
+const MAX_SOURCES_CHARS = 800;
 const MAX_ANSWER_CHARS = 700; // enough for the 📤 Share excerpt (see buildShareText)
 
-/** Button id for an action ("up" | "down" | "share") on feedback row `id`. */
+const ACTIONS = ["up", "down", "share", "details"];
+
+/** Button id for an action ("up" | "down" | "share" | "details") on feedback row `id`. */
 export function buildFeedbackId(action, id) {
-  return `fb:${action === "up" ? "up" : action === "share" ? "share" : "down"}:${id}`;
+  return `fb:${ACTIONS.includes(action) ? action : "down"}:${id}`;
 }
 
-/** Parses "fb:up:42" -> { rating: "up", id: 42 } ("rating" may also be "share"); else null. */
+/** Parses "fb:up:42" -> { rating: "up", id: 42 } ("rating" may also be "share" or "details"); else null. */
 export function parseFeedbackId(raw) {
-  const m = /^fb:(up|down|share):(\d{1,12})$/.exec(String(raw || ""));
+  const m = /^fb:(up|down|share|details):(\d{1,12})$/.exec(String(raw || ""));
   return m ? { rating: m[1], id: Number(m[2]) } : null;
+}
+
+/**
+ * Splits an answer into the readable body and its hidden "References" block.
+ * askChakudya appends "\n\n_References:_\n[1] ..." (see renumberCitations in src/index.js).
+ * Returns { main, references }; references is "" when there is none.
+ */
+export function splitReferences(answer) {
+  const text = String(answer || "");
+  const m = /\n+[ \t]*_*\*?references?:?\*?_*[ \t]*\n([\s\S]+)$/i.exec(text);
+  if (!m) return { main: text.trim(), references: "" };
+  return { main: text.slice(0, m.index).trim(), references: m[1].trim() };
 }
 
 /** Only substantive answers are worth asking about. */
@@ -36,25 +51,20 @@ export function shouldAskFeedback(answer) {
   return typeof answer === "string" && answer.trim().length >= MIN_ANSWER_CHARS;
 }
 
-/** { body, buttons: [{id, title}, ...] } for the follow-up message (titles are <= 20 chars). */
-export function buildFeedbackPrompt(feedbackId, isChichewa = false) {
-  return isChichewa
-    ? {
-        body: "Kodi yankho ili linakuthandizani?",
-        buttons: [
-          { id: buildFeedbackId("up", feedbackId), title: "👍 Zandithandiza" },
-          { id: buildFeedbackId("down", feedbackId), title: "👎 Sizandithandiza" },
-          { id: buildFeedbackId("share", feedbackId), title: "📤 Gawirani" },
-        ],
-      }
-    : {
-        body: "Was this answer helpful?",
-        buttons: [
-          { id: buildFeedbackId("up", feedbackId), title: "👍 Helpful" },
-          { id: buildFeedbackId("down", feedbackId), title: "👎 Not helpful" },
-          { id: buildFeedbackId("share", feedbackId), title: "📤 Share" },
-        ],
-      };
+/**
+ * { body, buttons: [{id, title}, ...] } for the follow-up message (titles are <= 20 chars, max 3).
+ * With hidden sources the first button is 📚 See details; otherwise the third is 📤 Share.
+ */
+export function buildFeedbackPrompt(feedbackId, isChichewa = false, hasDetails = false) {
+  const up = { id: buildFeedbackId("up", feedbackId), title: isChichewa ? "👍 Zandithandiza" : "👍 Helpful" };
+  const down = { id: buildFeedbackId("down", feedbackId), title: isChichewa ? "👎 Sizandithandiza" : "👎 Not helpful" };
+  const body = isChichewa ? "Kodi yankho ili linakuthandizani?" : "Was this answer helpful?";
+  if (hasDetails) {
+    const details = { id: buildFeedbackId("details", feedbackId), title: isChichewa ? "📚 Onani zambiri" : "📚 See details" };
+    return { body, buttons: [details, up, down] };
+  }
+  const share = { id: buildFeedbackId("share", feedbackId), title: isChichewa ? "📤 Gawirani" : "📤 Share" };
+  return { body, buttons: [up, down, share] };
 }
 
 // ── 📤 Share ──
@@ -99,15 +109,29 @@ export function buildShareMessage(isChichewa = false) {
     : { body: "Tap below to pick a chat and share this answer.", displayText: "📤 Share answer" };
 }
 
+/** { body, displayText } for the 📚 See details reply: the sources, plus a 📤 Share link button. */
+export function buildDetailsMessage(sources, isChichewa = false) {
+  const head = isChichewa ? "📚 *Magwero*" : "📚 *Sources*";
+  const hint = isChichewa ? "Dinani pansipa kuti mugawire yankho ili." : "Tap below to share this answer.";
+  const room = 1024 - head.length - hint.length - 6;
+  const src = String(sources || "").slice(0, Math.max(0, room)).trim();
+  return {
+    body: `${head}\n${src}\n\n${hint}`,
+    displayText: isChichewa ? "📤 Gawirani yankho" : "📤 Share answer",
+  };
+}
+
 /** The stored answer text for feedback row `id`, only if it belongs to `whatsappId`; else null. */
 export async function getAnswerForShare(db, { id, whatsappId }) {
   if (!db || !whatsappId || !Number.isFinite(id)) return null;
   try {
     const row = await db
-      .prepare(`SELECT answer, question FROM feedback WHERE id = ?1 AND whatsapp_id = ?2`)
+      .prepare(`SELECT answer, question, sources FROM feedback WHERE id = ?1 AND whatsapp_id = ?2`)
       .bind(id, whatsappId)
       .first();
-    return row?.answer ? { answer: String(row.answer), question: String(row.question || "") } : null;
+    return row?.answer
+      ? { answer: String(row.answer), question: String(row.question || ""), sources: String(row.sources || "") }
+      : null;
   } catch (err) {
     console.error("Feedback share lookup failed:", err);
     return null;
@@ -125,25 +149,29 @@ export function buildFeedbackThanks(rating, isChichewa = false) {
 }
 
 /**
- * Creates the feedback row and returns its id, or null when we should not ask (cooldown active,
- * no database, or any error).
+ * Creates the feedback row and returns its id, or null on any error. `cooldownMs` (default 0 = every
+ * answer gets buttons) can rate-limit prompts per person; `sources` is the hidden References text
+ * for the 📚 See details button.
  */
-export async function createFeedbackPrompt(db, { whatsappId, question, answer, nowMs = Date.now() }) {
+export async function createFeedbackPrompt(db, { whatsappId, question, answer, sources = "", nowMs = Date.now(), cooldownMs = 0 }) {
   if (!db || !whatsappId) return null;
   try {
-    const since = new Date(nowMs - FEEDBACK_COOLDOWN_MS).toISOString();
-    const recent = await db
-      .prepare(`SELECT COUNT(*) AS n FROM feedback WHERE whatsapp_id = ?1 AND ts >= ?2`)
-      .bind(whatsappId, since)
-      .first("n");
-    if (Number(recent) > 0) return null;
+    if (cooldownMs > 0) {
+      const since = new Date(nowMs - cooldownMs).toISOString();
+      const recent = await db
+        .prepare(`SELECT COUNT(*) AS n FROM feedback WHERE whatsapp_id = ?1 AND ts >= ?2`)
+        .bind(whatsappId, since)
+        .first("n");
+      if (Number(recent) > 0) return null;
+    }
     const res = await db
-      .prepare(`INSERT INTO feedback (whatsapp_id, ts, question, answer) VALUES (?1, ?2, ?3, ?4)`)
+      .prepare(`INSERT INTO feedback (whatsapp_id, ts, question, answer, sources) VALUES (?1, ?2, ?3, ?4, ?5)`)
       .bind(
         whatsappId,
         new Date(nowMs).toISOString(),
         String(question || "").slice(0, MAX_QUESTION_CHARS),
-        String(answer || "").slice(0, MAX_ANSWER_CHARS)
+        String(answer || "").slice(0, MAX_ANSWER_CHARS),
+        String(sources || "").slice(0, MAX_SOURCES_CHARS)
       )
       .run();
     const id = Number(res?.meta?.last_row_id);
