@@ -166,6 +166,10 @@
 
 import { verifyWebhookSignature } from "./webhookSignature.js";
 import { classifyFailure, buildFailureReply, looksChichewa } from "./fallbackReplies.js";
+import {
+  parseFeedbackId, shouldAskFeedback, buildFeedbackPrompt, buildFeedbackThanks,
+  createFeedbackPrompt, recordFeedback, feedbackSummary, pruneFeedback,
+} from "./feedback.js";
 import { getLimits, checkRateLimit, pruneRateLimits, buildRateLimitNotice } from "./rateLimit.js";
 import { shouldClassifyIntent, buildIntentMessages, parseIntentResponse } from "./intentClassifier.js";
 import zxingReaderWasmModule from "zxing-wasm/dist/reader/zxing_reader.wasm";
@@ -303,6 +307,7 @@ export default {
   async scheduled(event, env, ctx) {
     ctx.waitUntil(sendDailySummary(env));
     ctx.waitUntil(pruneRateLimits(env.DB));
+    ctx.waitUntil(pruneFeedback(env.DB));
   },
 };
 
@@ -415,7 +420,11 @@ async function handleIncomingMessage(request, env, ctx) {
       // still apply).
       const tapped =
         message.interactive?.list_reply?.id || message.interactive?.button_reply?.id;
-      if (tapped) {
+      const feedbackTap = parseFeedbackId(tapped);
+      if (feedbackTap) {
+        // 👍/👎 on an answer (see ./feedback.js): record it and say thanks. Never routed as a question.
+        await handleFeedbackTap(feedbackTap, from, env);
+      } else if (tapped) {
         await handleTextMessage(tapped, from, env, ctx);
       } else {
         return new Response("OK", { status: 200 });
@@ -1006,9 +1015,73 @@ async function handleTextMessage(userText, from, env, ctx) {
   let answer = await askChakudya(userText, from, env);
   // askChakudya returns these two canned strings (instead of throwing) when the provider is down,
   // rate-limited, or the question blew the subrequest ceiling: swap in the more helpful reply.
-  if (answer === LLM_BUSY_MESSAGE) answer = buildFailureReply("busy", userText);
-  else if (answer === SUBREQUEST_LIMIT_MESSAGE) answer = buildFailureReply("limit", userText);
+  let isRealAnswer = true;
+  if (answer === LLM_BUSY_MESSAGE) {
+    answer = buildFailureReply("busy", userText);
+    isRealAnswer = false;
+  } else if (answer === SUBREQUEST_LIMIT_MESSAGE) {
+    answer = buildFailureReply("limit", userText);
+    isRealAnswer = false;
+  }
   await sendWhatsAppReply(from, answer, env);
+
+  // After a real answer, follow up with 👍/👎 buttons (cooldown-limited, best-effort, off the
+  // critical path). See ./feedback.js.
+  if (isRealAnswer && shouldAskFeedback(answer)) {
+    ctx.waitUntil(askForFeedback(from, userText, answer, env));
+  }
+}
+
+async function askForFeedback(from, question, answer, env) {
+  try {
+    const id = await createFeedbackPrompt(env.DB, { whatsappId: from, question, answer });
+    if (!id) return;
+    await sendWhatsAppInteractiveButtons(from, buildFeedbackPrompt(id, looksChichewa(question)), env);
+  } catch (err) {
+    console.error("askForFeedback failed:", err);
+  }
+}
+
+async function handleFeedbackTap({ rating, id }, from, env) {
+  const recorded = await recordFeedback(env.DB, { id, whatsappId: from, rating });
+  if (!recorded) return; // repeat tap, someone else's id, or DB trouble: stay quiet
+  // The tap only carries the id, so the language of the thanks follows the stored question.
+  let question = "";
+  try {
+    question = (await env.DB.prepare(`SELECT question FROM feedback WHERE id = ?1`).bind(id).first("question")) || "";
+  } catch {}
+  await sendWhatsAppReply(from, buildFeedbackThanks(rating, looksChichewa(question)), env).catch(() => {});
+}
+
+// Reply-button message (max 3 buttons; titles <= 20 chars, body <= 1024). Throws on a failed send;
+// callers that must not fail (askForFeedback) catch it.
+async function sendWhatsAppInteractiveButtons(to, { body, buttons }, env) {
+  const res = await fetchWithTimeout(
+    fetch,
+    `https://graph.facebook.com/v20.0/${env.PHONE_NUMBER_ID}/messages`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${env.WHATSAPP_TOKEN}`,
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        to,
+        type: "interactive",
+        interactive: {
+          type: "button",
+          body: { text: body },
+          action: {
+            buttons: buttons.map((b) => ({ type: "reply", reply: { id: b.id, title: b.title } })),
+          },
+        },
+      }),
+    }
+  );
+  if (!res.ok) {
+    throw new Error(`WhatsApp buttons send error: ${res.status} ${await res.text()}`);
+  }
 }
 
 // One small, fast Groq call (no retry, short timeout) -> { intent: "menu"|"question", lang }.
@@ -3017,6 +3090,13 @@ async function sendDailySummary(env) {
       `Messages: ${messages}`,
       errors > 0 ? `⚠️ Errors: ${errors}` : `Errors: 0 ✅`,
     ];
+
+    // 👍/👎 from the last 24h, plus the latest 👎 questions so you can see what to improve.
+    const fb = await feedbackSummary(env.DB);
+    if (fb && fb.up + fb.down > 0) {
+      lines.push(`Feedback: 👍 ${fb.up} · 👎 ${fb.down}`);
+      for (const q of fb.recentDown) lines.push(`👎 “${q.length > 80 ? q.slice(0, 77) + "…" : q}”`);
+    }
 
     await sendWhatsAppReply(env.ADMIN_PHONE, lines.join("\n"), env);
   } catch (err) {
