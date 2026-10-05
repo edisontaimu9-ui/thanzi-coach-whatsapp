@@ -170,11 +170,15 @@
 
 import { verifyWebhookSignature } from "./webhookSignature.js";
 import {
-  isChichewaMessage, buildToEnglishMessages, buildToChichewaMessages, cleanTranslation,
+  buildToEnglishMessages, buildToChichewaMessages, cleanTranslation,
   translationPreservesFacts, CHICHEWA_AI_NOTE, CHICHEWA_FALLBACK_NOTE,
 } from "./chichewa.js";
 import { normalizeIncomingMessage, buildEditNotice } from "./editedMessages.js";
-import { classifyFailure, buildFailureReply, looksChichewa } from "./fallbackReplies.js";
+import { classifyFailure, buildFailureReply } from "./fallbackReplies.js";
+import {
+  resolveLanguage, detectLanguageCommand, languageConfirmation,
+  getLanguageState, saveLanguageState, learnLanguage,
+} from "./language.js";
 import {
   parseFeedbackId, shouldAskFeedback, buildFeedbackPrompt, buildFeedbackThanks,
   createFeedbackPrompt, recordFeedback, feedbackSummary, pruneFeedback,
@@ -399,7 +403,7 @@ async function handleIncomingMessage(request, env, ctx) {
     if (limit.limited) {
       if (limit.notify) {
         const said = message.text?.body || "";
-        await sendWhatsAppReply(from, buildRateLimitNotice(limit.scope, looksChichewa(said)), env).catch(() => {});
+        await sendWhatsAppReply(from, buildRateLimitNotice(limit.scope, await isChichewaFor(env, from, said)), env).catch(() => {});
       }
       return new Response("OK", { status: 200 });
     }
@@ -411,7 +415,7 @@ async function handleIncomingMessage(request, env, ctx) {
   }
   if (normalized.kind === "edit") {
     // Sent before the typing indicator so the indicator stays up while the real answer is prepared.
-    await sendWhatsAppReply(from, buildEditNotice("edit", looksChichewa(message.text.body)), env).catch(() => {});
+    await sendWhatsAppReply(from, buildEditNotice("edit", await isChichewaFor(env, from, message.text.body)), env).catch(() => {});
   }
 
   // Mark the message read and show WhatsApp's native "typing..." indicator
@@ -438,7 +442,7 @@ async function handleIncomingMessage(request, env, ctx) {
 
   try {
     if (message.type === "text") {
-      await handleTextMessage(message.text.body, from, env, ctx);
+      await handleTextMessage(message.text.body, from, env, ctx, { learnLanguage: true });
     } else if (message.type === "image") {
       await handleImageMessage(message.image, from, env, ctx);
     } else if (message.type === "audio") {
@@ -468,7 +472,7 @@ async function handleIncomingMessage(request, env, ctx) {
     // Tell the person what happened and what to do next (busy / question too big / other), echo
     // their question so they can resend it, and point to "menu". See ./fallbackReplies.js.
     const failedText = message.text?.body || message.interactive?.list_reply?.id || message.interactive?.button_reply?.id || "";
-    const reply = buildFailureReply(classifyFailure(err), failedText);
+    const reply = buildFailureReply(classifyFailure(err), failedText, (await isChichewaFor(env, from, failedText)) ? "ny" : "en");
     await sendWhatsAppReply(from, reply, env).catch(() => {}); // best-effort; don't crash the webhook ack
   }
 
@@ -486,7 +490,16 @@ async function handleIncomingMessage(request, env, ctx) {
 // whichever language the greeting itself was in. See detectGreetingLanguage
 // in ./detectors.js.
 
-async function handleTextMessage(userText, from, env, ctx) {
+// True when replies to this person should be in Chichewa: a clear signal in `text` wins, otherwise
+// the remembered language (see ./language.js). Used by the notice/feedback paths that don't already
+// hold the language state.
+async function isChichewaFor(env, from, text) {
+  return resolveLanguage(text, await getLanguageState(env.DB, from)) === "ny";
+}
+
+// `opts.learnLanguage` is true only for typed text: voice transcripts are forced to English and
+// tapped menu rows are English example prompts, so neither says anything about the person's language.
+async function handleTextMessage(userText, from, env, ctx, opts = {}) {
   // Flexible openers: "hello Thanzi, how much iron do I need" -> answer the question with the
   // greeting stripped. (A bare greeting / generic help request is handled further down, after the
   // in-progress flow handlers, so a mid-flow answer is never swallowed.) See parseGreeting.
@@ -494,6 +507,19 @@ async function handleTextMessage(userText, from, env, ctx) {
   if (openingParse && openingParse.rest) {
     userText = openingParse.rest;
   }
+
+  // Remembered reply language (./language.js). "English" / "Chichewa" is an explicit, locked choice;
+  // otherwise the language follows what the person has been writing, so short messages like
+  // "nsima" or "yes" keep the conversation in the same language.
+  const langState = await getLanguageState(env.DB, from);
+  const langCommand = detectLanguageCommand(userText);
+  if (langCommand) {
+    await saveLanguageState(env.DB, from, { language: langCommand, locked: true, en_streak: 0 });
+    await sendWhatsAppReply(from, languageConfirmation(langCommand), env);
+    return;
+  }
+  const lang = resolveLanguage(userText, langState);
+  if (opts.learnLanguage) ctx.waitUntil(learnLanguage(env.DB, from, langState, userText));
 
   // Under-5 malnutrition screening: multi-turn structured intake (see
   // ./under5Screening.js). Checked first, both to continue an in-progress
@@ -618,7 +644,8 @@ async function handleTextMessage(userText, from, env, ctx) {
   // show the tappable menu. Anything with a real question after the greeting was stripped above.
   const greeting = parseGreeting(userText);
   if (greeting && !greeting.rest) {
-    await sendPromptList(from, greeting.lang, env);
+    const menuLang = langState?.locked ? langState.language : greeting.lang === "ny" ? "ny" : lang;
+    await sendPromptList(from, menuLang, env);
     return;
   }
 
@@ -1035,16 +1062,17 @@ async function handleTextMessage(userText, from, env, ctx) {
   // Any failure returns "question", so this can only ever ADD the menu, never block an answer.
   // See ./intentClassifier.js.
   if (shouldClassifyIntent(userText)) {
-    const { intent, lang } = await classifyHelpIntent(userText, env);
+    const { intent, lang: classifiedLang } = await classifyHelpIntent(userText, env);
     if (intent === "menu") {
-      await sendPromptList(from, lang, env);
+      const menuLang = langState?.locked ? langState.language : classifiedLang === "ny" ? "ny" : lang;
+      await sendPromptList(from, menuLang, env);
       return;
     }
   }
 
   // Chichewa question (or Chichewa/English mix): search in English, then translate the answer
   // back. Every step falls back to English, never to a worse answer. See ./chichewa.js.
-  const inChichewa = isChichewaMessage(userText);
+  const inChichewa = lang === "ny";
   let searchText = userText;
   if (inChichewa) {
     const english = await translateWithGroq(buildToEnglishMessages(userText), env, 8000);
@@ -1056,10 +1084,10 @@ async function handleTextMessage(userText, from, env, ctx) {
   // rate-limited, or the question blew the subrequest ceiling: swap in the more helpful reply.
   let isRealAnswer = true;
   if (answer === LLM_BUSY_MESSAGE) {
-    answer = buildFailureReply("busy", userText);
+    answer = buildFailureReply("busy", userText, lang);
     isRealAnswer = false;
   } else if (answer === SUBREQUEST_LIMIT_MESSAGE) {
-    answer = buildFailureReply("limit", userText);
+    answer = buildFailureReply("limit", userText, lang);
     isRealAnswer = false;
   }
   // Real answers: hide the References block behind a 📚 See details button and follow up with the
@@ -1071,7 +1099,7 @@ async function handleTextMessage(userText, from, env, ctx) {
   }
   if (isRealAnswer && shouldAskFeedback(main)) {
     await sendWhatsAppReply(from, main, env);
-    ctx.waitUntil(askForFeedback(from, userText, main, references, env));
+    ctx.waitUntil(askForFeedback(from, userText, main, references, env, lang === "ny"));
   } else if (isRealAnswer && inChichewa) {
     await sendWhatsAppReply(from, references ? `${main}\n\n_References:_\n${references}` : main, env);
   } else {
@@ -1128,8 +1156,7 @@ async function translateWithGroq(messages, env, timeoutMs) {
 
 // Follow-up buttons after an answer. Best-effort, but the hidden references must never be lost:
 // if the buttons can't be created or sent, the sources are sent as plain text instead.
-async function askForFeedback(from, question, answer, references, env) {
-  const isNy = looksChichewa(question);
+async function askForFeedback(from, question, answer, references, env, isNy = false) {
   try {
     const id = await createFeedbackPrompt(env.DB, { whatsappId: from, question, answer, sources: references });
     if (!id) throw new Error("no feedback row");
@@ -1147,7 +1174,7 @@ async function handleFeedbackTap({ rating, id }, from, env) {
     // 📚 See details: reveal the hidden sources, with a 📤 Share link button underneath.
     const stored = await getAnswerForShare(env.DB, { id, whatsappId: from });
     if (!stored || !stored.sources) return;
-    const isNy = looksChichewa(stored.question);
+    const isNy = await isChichewaFor(env, from, stored.question);
     const msg = buildDetailsMessage(stored.sources, isNy);
     const url = buildShareUrl(buildShareText(stored.answer, env.BOT_WA_NUMBER));
     await sendWhatsAppInteractiveCtaUrl(from, { body: msg.body, displayText: msg.displayText, url }, env).catch(async (err) => {
@@ -1162,7 +1189,7 @@ async function handleFeedbackTap({ rating, id }, from, env) {
     // Thanzi Coach" link to the shared text. Can be tapped repeatedly; it never touches the rating.
     const stored = await getAnswerForShare(env.DB, { id, whatsappId: from });
     if (!stored) return;
-    const msg = buildShareMessage(looksChichewa(stored.question));
+    const msg = buildShareMessage(await isChichewaFor(env, from, stored.question));
     const url = buildShareUrl(buildShareText(stored.answer, env.BOT_WA_NUMBER));
     await sendWhatsAppInteractiveCtaUrl(from, { body: msg.body, displayText: msg.displayText, url }, env).catch((err) => {
       console.error("Share link send failed:", err);
@@ -1176,7 +1203,7 @@ async function handleFeedbackTap({ rating, id }, from, env) {
   try {
     question = (await env.DB.prepare(`SELECT question FROM feedback WHERE id = ?1`).bind(id).first("question")) || "";
   } catch {}
-  await sendWhatsAppReply(from, buildFeedbackThanks(rating, looksChichewa(question)), env).catch(() => {});
+  await sendWhatsAppReply(from, buildFeedbackThanks(rating, await isChichewaFor(env, from, question)), env).catch(() => {});
 }
 
 // Single link-button message ("cta_url"): one button that opens `url`. display_text <= 20 chars.

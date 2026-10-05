@@ -54,6 +54,10 @@ describe("buildFailureReply", () => {
     assert.match(r, /Nkhokwe ya zakudya/);
     assert.match(r, /Funso lanu/);
   });
+  test("a remembered language overrides detection", () => {
+    assert.match(buildFailureReply("busy", "nsima", "ny"), /Nkhokwe ya zakudya/);
+    assert.match(buildFailureReply("busy", "Ndikufuna thandizo pa zakudya", "en"), /database is busy/);
+  });
   test("unknown kind falls back to the generic error reply; empty text adds no echo", () => {
     const r = buildFailureReply("weird", "");
     assert.match(r, /ran into a problem/);

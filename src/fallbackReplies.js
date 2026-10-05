@@ -59,9 +59,9 @@ const REPLIES = {
   },
 };
 
-/** Builds the reply for a failure `kind` ("busy" | "limit" | "error"), echoing the person's text. */
-export function buildFailureReply(kind, userText) {
-  const lang = looksChichewa(userText) ? "ny" : "en";
+/** Builds the reply for a failure `kind` ("busy" | "limit" | "error"), echoing the person's text. `forcedLang` ("en" | "ny") overrides detection, e.g. the remembered language. */
+export function buildFailureReply(kind, userText, forcedLang) {
+  const lang = forcedLang === "ny" || forcedLang === "en" ? forcedLang : looksChichewa(userText) ? "ny" : "en";
   const k = REPLIES[lang][kind] ? kind : "error";
   const withEcho = k === "limit" ? "" : echo(userText, lang);
   return REPLIES[lang][k] + withEcho;
