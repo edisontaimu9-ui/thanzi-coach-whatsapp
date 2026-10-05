@@ -4,6 +4,8 @@
  * Split out of src/index.js with no behaviour change.
  */
 
+import { isProviderUnavailable } from "./errors.js";
+
 
 
 // Default per-request timeout for outbound HTTP calls (Chakudya, Groq,
@@ -62,4 +64,43 @@ export async function fetchWithRetry(fetcher, input, init = {}, timeoutMs = FETC
 // retry instead of surfacing straight to the user.
 export function chakudyaFetch(env, path, init) {
   return fetchWithRetry(env.CHAKUDYA_API.fetch.bind(env.CHAKUDYA_API), path, init);
+}
+
+// ── One more try for "provider busy" answers ──
+// fetchWithRetry (above) already retries a 5xx or a thrown request once after 300ms, which only helps
+// with blips. A rate-limited (429) or briefly overloaded provider usually needs a couple of seconds,
+// so askChakudya wraps its call in this: if the answer comes back 429/5xx, wait ~2s (or the server's
+// Retry-After, capped at 3s) and ask exactly once more, quietly, before the person sees "busy".
+// Skipped when the first try already took long (a hung request has used its time), so the person
+// never waits through several slow attempts. Returns the final Response; callers keep their
+// existing handling for a response that is still unavailable.
+export const RAG_RETRY_DELAY_MS = 2000;
+export const RAG_RETRY_MAX_WAIT_MS = 3000;
+export const RAG_RETRY_MAX_ELAPSED_MS = 12000;
+
+export async function retryOnceOnUnavailable(attempt, opts = {}) {
+  const {
+    delayMs = RAG_RETRY_DELAY_MS,
+    maxElapsedMs = RAG_RETRY_MAX_ELAPSED_MS,
+    isRetryable = isProviderUnavailable,
+    now = Date.now,
+    wait = sleep,
+  } = opts;
+  const started = now();
+  let res;
+  try {
+    res = await attempt();
+  } catch (err) {
+    if (now() - started >= maxElapsedMs) throw err;
+    console.warn("Chakudya request failed quickly, retrying once:", err?.message || err);
+    await wait(delayMs);
+    return attempt();
+  }
+  if (!isRetryable(res.status) || now() - started >= maxElapsedMs) return res;
+  const retryAfter = Number(res.headers?.get?.("Retry-After"));
+  const pause = Math.min(Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : delayMs, RAG_RETRY_MAX_WAIT_MS);
+  console.warn(`Chakudya answered ${res.status}, retrying once after ${pause}ms`);
+  try { await res.body?.cancel?.(); } catch {}
+  await wait(pause);
+  return attempt();
 }

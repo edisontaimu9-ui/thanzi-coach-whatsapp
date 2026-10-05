@@ -4,7 +4,7 @@
  * Split out of src/index.js with no behaviour change.
  */
 
-import { chakudyaFetch } from "./http.js";
+import { chakudyaFetch, retryOnceOnUnavailable } from "./http.js";
 import { buildConciseNutritionQuery, formatFoodResult, getFoodItemName, markdownToWhatsApp, normalizeCitationBrackets, normalizeFoodName, normalizeMultiTopicQuery, renumberCitations, roundNutrient, scaleFoodToGrams, sourceLabel, toFoodContext } from "./formatting.js";
 import { LLM_BUSY_MESSAGE, SUBREQUEST_LIMIT_MESSAGE, isProviderUnavailable, looksLikeLeakedProviderError } from "./errors.js";
 
@@ -388,7 +388,7 @@ export async function lookupDri({ nutrientKey, age, sex, lifeStageType }, env) {
 export async function askChakudya(query, fromNumber, env) {
   // Service binding call — internal Worker-to-Worker, not a public fetch.
   // See wrangler.toml for why (avoids Cloudflare error 1042).
-  const res = await chakudyaFetch(env, "https://chakudya-api/rag/ask", {
+  const ragInit = {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -405,7 +405,9 @@ export async function askChakudya(query, fromNumber, env) {
       // their own Thandizo memory thread across conversations.
       session_id: `whatsapp-${fromNumber}`,
     }),
-  });
+  };
+  // A busy (429/5xx) answer gets one quiet retry after ~2s before the person sees "busy".
+  const res = await retryOnceOnUnavailable(() => chakudyaFetch(env, "https://chakudya-api/rag/ask", ragInit));
 
   if (isProviderUnavailable(res.status)) {
     console.error("Chakudya provider unavailable:", res.status, await res.text());
