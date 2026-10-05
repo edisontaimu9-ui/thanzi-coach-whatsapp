@@ -224,6 +224,61 @@ export async function feedbackSummary(db, nowMs = Date.now()) {
   }
 }
 
+/** { up, down } rated counts over the last `days` (zeros on any error, e.g. table not migrated yet). */
+export async function feedbackCounts(db, days = 30, nowMs = Date.now()) {
+  try {
+    const since = new Date(nowMs - days * 86400 * 1000).toISOString();
+    const counts = await db
+      .prepare(`SELECT rating, COUNT(*) AS n FROM feedback WHERE rating IS NOT NULL AND rated_at >= ?1 GROUP BY rating`)
+      .bind(since)
+      .all();
+    const by = Object.fromEntries((counts?.results || []).map((r) => [r.rating, Number(r.n)]));
+    return { up: by.up || 0, down: by.down || 0 };
+  } catch (err) {
+    console.error("Feedback counts failed:", err);
+    return { up: 0, down: 0 };
+  }
+}
+
+/**
+ * Recent rated feedback for the dashboard: [{ id, rated_at, rating, question, answer }], newest
+ * first. `rating` is "down" (default), "up", or "all". No phone numbers are ever included.
+ * Returns null on error.
+ */
+export async function listFeedback(db, { days = 30, rating = "down", limit = 50, nowMs = Date.now() } = {}) {
+  try {
+    const since = new Date(nowMs - days * 86400 * 1000).toISOString();
+    const max = Math.min(Math.max(Number(limit) || 50, 1), 200);
+    const filtered = rating === "up" || rating === "down";
+    const stmt = filtered
+      ? db
+          .prepare(
+            `SELECT id, rated_at, rating, question, answer FROM feedback
+             WHERE rating IS NOT NULL AND rated_at >= ?1 AND rating = ?2
+             ORDER BY rated_at DESC LIMIT ?3`
+          )
+          .bind(since, rating, max)
+      : db
+          .prepare(
+            `SELECT id, rated_at, rating, question, answer FROM feedback
+             WHERE rating IS NOT NULL AND rated_at >= ?1
+             ORDER BY rated_at DESC LIMIT ?2`
+          )
+          .bind(since, max);
+    const res = await stmt.all();
+    return (res?.results || []).map((r) => ({
+      id: Number(r.id),
+      rated_at: String(r.rated_at),
+      rating: String(r.rating),
+      question: String(r.question || ""),
+      answer: String(r.answer || "").slice(0, 300),
+    }));
+  } catch (err) {
+    console.error("Feedback list failed:", err);
+    return null;
+  }
+}
+
 /** Deletes feedback older than the retention window (daily cron). */
 export async function pruneFeedback(db, nowMs = Date.now()) {
   try {

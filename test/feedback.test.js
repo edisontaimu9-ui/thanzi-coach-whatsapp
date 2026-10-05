@@ -2,6 +2,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import {
   buildFeedbackId, parseFeedbackId, shouldAskFeedback, buildFeedbackPrompt, buildFeedbackThanks,
+  feedbackCounts, listFeedback,
   buildShareText, buildShareUrl, buildShareMessage, getAnswerForShare, splitReferences, buildDetailsMessage,
   createFeedbackPrompt, recordFeedback, feedbackSummary, pruneFeedback, FEEDBACK_COOLDOWN_MS,
 } from "../src/feedback.js";
@@ -45,6 +46,16 @@ function fakeDb() {
             return { meta: {} };
           },
           async all() {
+            if (/SELECT id, rated_at/.test(sql)) {
+              const withRating = /rating = \?2/.test(sql);
+              const limit = withRating ? a[2] : a[1];
+              return {
+                results: rows
+                  .filter((r) => r.rating && r.rated_at >= a[0] && (!withRating || r.rating === a[1]))
+                  .sort((x, y) => (x.rated_at < y.rated_at ? 1 : -1))
+                  .slice(0, limit),
+              };
+            }
             if (/GROUP BY/.test(sql)) {
               const m = {};
               for (const r of rows) if (r.rating && r.rated_at >= a[0]) m[r.rating] = (m[r.rating] || 0) + 1;
@@ -213,6 +224,36 @@ describe("📚 See details", () => {
     const id = await createFeedbackPrompt(db, { whatsappId: "A", question: "q", answer: "answer", sources: "[1] Src", nowMs: T0 });
     assert.equal((await getAnswerForShare(db, { id, whatsappId: "A" })).sources, "[1] Src");
     assert.equal(await getAnswerForShare(db, { id, whatsappId: "B" }), null);
+  });
+});
+
+describe("dashboard queries", () => {
+  async function seed(db) {
+    for (const [who, rating, q, dt] of [["A", "up", "good q", 1000], ["B", "down", "bad q1", 2000], ["C", "down", "bad q2", 3000]]) {
+      const id = await createFeedbackPrompt(db, { whatsappId: who, question: q, answer: "ans ".repeat(200), nowMs: T0 });
+      await recordFeedback(db, { id, whatsappId: who, rating, nowMs: T0 + dt });
+    }
+    await createFeedbackPrompt(db, { whatsappId: "D", question: "unrated", answer: "a", nowMs: T0 });
+  }
+
+  test("feedbackCounts counts rated rows only; zeros on error", async () => {
+    const db = fakeDb();
+    await seed(db);
+    assert.deepEqual(await feedbackCounts(db, 30, T0 + 5000), { up: 1, down: 2 });
+    assert.deepEqual(await feedbackCounts({ prepare() { throw new Error("no table"); } }, 30), { up: 0, down: 0 });
+  });
+
+  test("listFeedback defaults to 👎, newest first, trims answers, never includes phone numbers", async () => {
+    const db = fakeDb();
+    await seed(db);
+    const downs = await listFeedback(db, { nowMs: T0 + 5000 });
+    assert.deepEqual(downs.map((r) => r.question), ["bad q2", "bad q1"]);
+    assert.ok(downs[0].answer.length <= 300);
+    assert.equal(JSON.stringify(downs).includes("whatsapp_id"), false);
+    assert.deepEqual((await listFeedback(db, { rating: "up", nowMs: T0 + 5000 })).map((r) => r.question), ["good q"]);
+    assert.equal((await listFeedback(db, { rating: "all", nowMs: T0 + 5000 })).length, 3);
+    assert.equal((await listFeedback(db, { rating: "all", limit: 1, nowMs: T0 + 5000 })).length, 1);
+    assert.equal(await listFeedback({ prepare() { throw new Error("x"); } }), null);
   });
 });
 

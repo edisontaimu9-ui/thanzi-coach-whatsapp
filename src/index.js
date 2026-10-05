@@ -134,6 +134,10 @@
  *   GROQ_API_KEY            - console.groq.com API key, for direct barcode-from-photo
  *                            reads AND voice-note transcription (Whisper)
  *   STATS_TOKEN             - a string you invent; required as ?token= on GET /stats
+ *   FEEDBACK_TOKEN          - optional; a DIFFERENT string you invent, required as ?token= on
+ *                            GET /stats/feedback (the 👎/👍 questions). Keep it out of the
+ *                            dashboard source: it is typed into the dashboard once. If unset,
+ *                            that endpoint always answers 403.
  *   ADMIN_PHONE             - optional; your own WhatsApp number for the daily
  *                            summary cron job (see wrangler.toml [triggers]).
  *                            No-ops if unset.
@@ -171,7 +175,7 @@ import {
   parseFeedbackId, shouldAskFeedback, buildFeedbackPrompt, buildFeedbackThanks,
   createFeedbackPrompt, recordFeedback, feedbackSummary, pruneFeedback,
   getAnswerForShare, buildShareText, buildShareUrl, buildShareMessage,
-  splitReferences, buildDetailsMessage,
+  splitReferences, buildDetailsMessage, feedbackCounts, listFeedback,
 } from "./feedback.js";
 import { getLimits, checkRateLimit, pruneRateLimits, buildRateLimitNotice } from "./rateLimit.js";
 import { shouldClassifyIntent, buildIntentMessages, parseIntentResponse } from "./intentClassifier.js";
@@ -295,6 +299,10 @@ export default {
 
     if (request.method === "GET" && url.pathname === "/stats") {
       return handleStats(url, env);
+    }
+
+    if (request.method === "GET" && url.pathname === "/stats/feedback") {
+      return handleStatsFeedback(url, env);
     }
 
     if (request.method === "GET" && url.pathname === "/stats/timeseries") {
@@ -3213,7 +3221,14 @@ async function handleStats(url, env) {
           .first("n"),
       ]);
 
+    // Aggregate 👍/👎 only (no question text, so it is safe behind the dashboard's STATS_TOKEN).
+    // Own try/catch inside feedbackCounts: /stats must still work before migration 0007 is applied.
+    const fb = await feedbackCounts(env.DB, days);
+
     const stats = {
+      feedback_up: fb.up,
+      feedback_down: fb.down,
+      feedback_satisfaction: fb.up + fb.down > 0 ? Number((fb.up / (fb.up + fb.down)).toFixed(4)) : null,
       period_days: days,
       total_users: totalUsers,
       new_users: newUsers,
@@ -3238,6 +3253,28 @@ async function handleStats(url, env) {
 
 // GET /stats/timeseries?token=...&days=30 — per-day messages and new-user
 // counts, for the dashboard's trend chart. Same token auth as /stats.
+// GET /stats/feedback?token=...&days=30&rating=down|up|all&limit=50 — the rated questions
+// themselves, for the dashboard's feedback list. Needs FEEDBACK_TOKEN (separate from STATS_TOKEN,
+// which is baked into the public dashboard bundle), because these are people's real questions.
+async function handleStatsFeedback(url, env) {
+  const token = url.searchParams.get("token");
+  if (!env.FEEDBACK_TOKEN || token !== env.FEEDBACK_TOKEN) {
+    return new Response("Forbidden", { status: 403, headers: STATS_CORS_HEADERS });
+  }
+  const days = Math.min(Number(url.searchParams.get("days")) || 30, 90);
+  const rating = url.searchParams.get("rating") || "down";
+  const items = await listFeedback(env.DB, { days, rating, limit: url.searchParams.get("limit") });
+  if (items === null) {
+    return new Response(JSON.stringify({ error: "feedback unavailable" }), {
+      status: 500,
+      headers: { "Content-Type": "application/json", ...STATS_CORS_HEADERS },
+    });
+  }
+  return new Response(JSON.stringify({ period_days: days, rating, items }, null, 2), {
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store", ...STATS_CORS_HEADERS },
+  });
+}
+
 async function handleStatsTimeseries(url, env) {
   const token = url.searchParams.get("token");
   if (!env.STATS_TOKEN || token !== env.STATS_TOKEN) {
