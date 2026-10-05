@@ -169,6 +169,10 @@
  */
 
 import { verifyWebhookSignature } from "./webhookSignature.js";
+import {
+  isChichewaMessage, buildToEnglishMessages, buildToChichewaMessages, cleanTranslation,
+  translationPreservesFacts, CHICHEWA_AI_NOTE, CHICHEWA_FALLBACK_NOTE,
+} from "./chichewa.js";
 import { normalizeIncomingMessage, buildEditNotice } from "./editedMessages.js";
 import { classifyFailure, buildFailureReply, looksChichewa } from "./fallbackReplies.js";
 import {
@@ -1038,7 +1042,16 @@ async function handleTextMessage(userText, from, env, ctx) {
     }
   }
 
-  let answer = await askChakudya(userText, from, env);
+  // Chichewa question (or Chichewa/English mix): search in English, then translate the answer
+  // back. Every step falls back to English, never to a worse answer. See ./chichewa.js.
+  const inChichewa = isChichewaMessage(userText);
+  let searchText = userText;
+  if (inChichewa) {
+    const english = await translateWithGroq(buildToEnglishMessages(userText), env, 8000);
+    if (english) searchText = english;
+  }
+
+  let answer = await askChakudya(searchText, from, env);
   // askChakudya returns these two canned strings (instead of throwing) when the provider is down,
   // rate-limited, or the question blew the subrequest ceiling: swap in the more helpful reply.
   let isRealAnswer = true;
@@ -1052,12 +1065,64 @@ async function handleTextMessage(userText, from, env, ctx) {
   // Real answers: hide the References block behind a 📚 See details button and follow up with the
   // 👍/👎 (+ details or 📤 Share) buttons. See ./feedback.js. Anything that isn't a substantive
   // real answer (failure replies, one-liners) is sent exactly as before, references included.
-  const { main, references } = splitReferences(answer);
+  let { main, references } = splitReferences(answer);
+  if (isRealAnswer && inChichewa) {
+    main = await localizeAnswer(main, env);
+  }
   if (isRealAnswer && shouldAskFeedback(main)) {
     await sendWhatsAppReply(from, main, env);
     ctx.waitUntil(askForFeedback(from, userText, main, references, env));
+  } else if (isRealAnswer && inChichewa) {
+    await sendWhatsAppReply(from, references ? `${main}\n\n_References:_\n${references}` : main, env);
   } else {
     await sendWhatsAppReply(from, answer, env);
+  }
+}
+
+// English answer -> Chichewa + an "AI-translated" note. If the translation fails or doesn't keep
+// every number and [n] marker, the English answer is sent with a short Chichewa apology instead.
+async function localizeAnswer(englishMain, env) {
+  const raw = await translateWithGroq(buildToChichewaMessages(englishMain), env, 25000);
+  if (raw && translationPreservesFacts(englishMain, raw)) {
+    return `${raw}\n\n${CHICHEWA_AI_NOTE}`;
+  }
+  if (raw) console.warn("Chichewa translation rejected (numbers/markers changed or bad length)");
+  return `${CHICHEWA_FALLBACK_NOTE}\n\n${englishMain}`;
+}
+
+// One Groq chat call used for translation. Returns the cleaned text, or null on any failure.
+async function translateWithGroq(messages, env, timeoutMs) {
+  if (!env.GROQ_API_KEY) return null;
+  try {
+    const res = await fetchWithTimeout(
+      fetch,
+      "https://api.groq.com/openai/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${env.GROQ_API_KEY}`,
+        },
+        body: JSON.stringify({
+          model: "openai/gpt-oss-120b",
+          messages,
+          temperature: 0.2,
+          max_completion_tokens: 3000,
+          reasoning_effort: "low",
+        }),
+      },
+      timeoutMs
+    );
+    if (!res.ok) {
+      console.error("Translation call error:", res.status);
+      return null;
+    }
+    const body = await res.json();
+    const text = cleanTranslation(body?.choices?.[0]?.message?.content);
+    return text || null;
+  } catch (err) {
+    console.error("Translation call failed:", err?.message || err);
+    return null;
   }
 }
 

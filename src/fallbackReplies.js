@@ -7,6 +7,8 @@
  * Pure helpers (no fetch/env), unit-tested in test/fallbackReplies.test.js.
  */
 
+import { isChichewaMessage } from "./chichewa.js";
+
 /** "limit" (question too big for one call), "busy" (upstream slow/down/rate-limited), or "error". */
 export function classifyFailure(err) {
   const msg = String(err?.message || err || "").toLowerCase();
@@ -20,14 +22,9 @@ export function classifyFailure(err) {
   return "error";
 }
 
-// Common Chichewa words/greetings; two hits (or one very distinctive one) marks a message as Chichewa.
-const CHICHEWA_STRONG = /\b(?:ndikufuna|ndifuna|ndithandizeni|thandizo|zakudya|chakudya|mungandithandize|muli\s+bwanji|zikomo|ndili|funso|mafunso|bwanji|nsima\s+ndi|ndi\s+zakudya|kodi)\b/i;
-const CHICHEWA_WEAK = /\b(?:ndi|ya|za|wa|pa|kwa|mu|ku|ali|ndani|chiyani|ziti|ndingathe|ndingatani)\b/gi;
-
+/** True when the text looks Chichewa (or a Chichewa/English mix). See ./chichewa.js. */
 export function looksChichewa(text) {
-  const t = String(text || "");
-  if (CHICHEWA_STRONG.test(t)) return true;
-  return (t.match(CHICHEWA_WEAK) || []).length >= 2;
+  return isChichewaMessage(text);
 }
 
 function echo(text, lang) {
