@@ -170,6 +170,7 @@ import { classifyFailure, buildFailureReply, looksChichewa } from "./fallbackRep
 import {
   parseFeedbackId, shouldAskFeedback, buildFeedbackPrompt, buildFeedbackThanks,
   createFeedbackPrompt, recordFeedback, feedbackSummary, pruneFeedback,
+  getAnswerForShare, buildShareText, buildShareUrl, buildShareMessage,
 } from "./feedback.js";
 import { getLimits, checkRateLimit, pruneRateLimits, buildRateLimitNotice } from "./rateLimit.js";
 import { shouldClassifyIntent, buildIntentMessages, parseIntentResponse } from "./intentClassifier.js";
@@ -1059,6 +1060,19 @@ async function askForFeedback(from, question, answer, env) {
 }
 
 async function handleFeedbackTap({ rating, id }, from, env) {
+  if (rating === "share") {
+    // 📤 Share: reply with a link button that opens WhatsApp's chat picker with the answer
+    // pre-filled (wa.me/?text=...). Optional BOT_WA_NUMBER (digits, e.g. 265...) adds a "chat with
+    // Thanzi Coach" link to the shared text. Can be tapped repeatedly; it never touches the rating.
+    const stored = await getAnswerForShare(env.DB, { id, whatsappId: from });
+    if (!stored) return;
+    const msg = buildShareMessage(looksChichewa(stored.question));
+    const url = buildShareUrl(buildShareText(stored.answer, env.BOT_WA_NUMBER));
+    await sendWhatsAppInteractiveCtaUrl(from, { body: msg.body, displayText: msg.displayText, url }, env).catch((err) => {
+      console.error("Share link send failed:", err);
+    });
+    return;
+  }
   const recorded = await recordFeedback(env.DB, { id, whatsappId: from, rating });
   if (!recorded) return; // repeat tap, someone else's id, or DB trouble: stay quiet
   // The tap only carries the id, so the language of the thanks follows the stored question.
@@ -1067,6 +1081,34 @@ async function handleFeedbackTap({ rating, id }, from, env) {
     question = (await env.DB.prepare(`SELECT question FROM feedback WHERE id = ?1`).bind(id).first("question")) || "";
   } catch {}
   await sendWhatsAppReply(from, buildFeedbackThanks(rating, looksChichewa(question)), env).catch(() => {});
+}
+
+// Single link-button message ("cta_url"): one button that opens `url`. display_text <= 20 chars.
+async function sendWhatsAppInteractiveCtaUrl(to, { body, displayText, url }, env) {
+  const res = await fetchWithTimeout(
+    fetch,
+    `https://graph.facebook.com/v20.0/${env.PHONE_NUMBER_ID}/messages`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${env.WHATSAPP_TOKEN}`,
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        to,
+        type: "interactive",
+        interactive: {
+          type: "cta_url",
+          body: { text: body },
+          action: { name: "cta_url", parameters: { display_text: displayText, url } },
+        },
+      }),
+    }
+  );
+  if (!res.ok) {
+    throw new Error(`WhatsApp link-button send error: ${res.status} ${await res.text()}`);
+  }
 }
 
 // Reply-button message (max 3 buttons; titles <= 20 chars, body <= 1024). Throws on a failed send;

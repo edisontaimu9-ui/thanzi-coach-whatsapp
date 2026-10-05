@@ -2,6 +2,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import {
   buildFeedbackId, parseFeedbackId, shouldAskFeedback, buildFeedbackPrompt, buildFeedbackThanks,
+  buildShareText, buildShareUrl, buildShareMessage, getAnswerForShare,
   createFeedbackPrompt, recordFeedback, feedbackSummary, pruneFeedback, FEEDBACK_COOLDOWN_MS,
 } from "../src/feedback.js";
 
@@ -14,7 +15,13 @@ function fakeDb() {
     prepare(sql) {
       return {
         bind: (...a) => ({
-          async first() {
+          async first(col) {
+            if (/SELECT answer/.test(sql)) {
+              return rows.find((r) => r.id === a[0] && r.whatsapp_id === a[1]) || null;
+            }
+            if (/SELECT question/.test(sql)) {
+              return rows.find((r) => r.id === a[0])?.question ?? null;
+            }
             // cooldown count: whatsapp_id = a[0], ts >= a[1]
             return rows.filter((r) => r.whatsapp_id === a[0] && r.ts >= a[1]).length;
           },
@@ -63,6 +70,8 @@ describe("button ids", () => {
   test("round-trip and reject junk", () => {
     assert.equal(buildFeedbackId("up", 42), "fb:up:42");
     assert.deepEqual(parseFeedbackId("fb:down:7"), { rating: "down", id: 7 });
+    assert.deepEqual(parseFeedbackId("fb:share:9"), { rating: "share", id: 9 });
+    assert.equal(buildFeedbackId("share", 9), "fb:share:9");
     for (const bad of ["fb:maybe:1", "fb:up:", "fb:up:abc", "hello", "", null, undefined, "fb:up:1 "]) {
       assert.equal(parseFeedbackId(bad), null, String(bad));
     }
@@ -73,7 +82,7 @@ describe("prompt text", () => {
   test("titles fit WhatsApp's 20-char limit in both languages", () => {
     for (const ny of [false, true]) {
       const p = buildFeedbackPrompt(5, ny);
-      assert.equal(p.buttons.length, 2);
+      assert.equal(p.buttons.length, 3);
       for (const b of p.buttons) assert.ok([...b.title].length <= 20, b.title);
       assert.equal(parseFeedbackId(p.buttons[0].id).id, 5);
     }
@@ -96,7 +105,7 @@ describe("createFeedbackPrompt / recordFeedback", () => {
     const id = await createFeedbackPrompt(db, { whatsappId: "A", question: "q".repeat(500), answer: "a".repeat(900), nowMs: T0 });
     assert.equal(id, 1);
     assert.equal(db.rows[0].question.length, 200);
-    assert.equal(db.rows[0].answer.length, 300);
+    assert.equal(db.rows[0].answer.length, 700);
     assert.equal(await createFeedbackPrompt(db, { whatsappId: "A", question: "q", answer: "a", nowMs: T0 + 1000 }), null);
     assert.equal(await createFeedbackPrompt(db, { whatsappId: "B", question: "q", answer: "a", nowMs: T0 + 1000 }), 2);
     assert.equal(await createFeedbackPrompt(db, { whatsappId: "A", question: "q", answer: "a", nowMs: T0 + FEEDBACK_COOLDOWN_MS + 1000 }), 3);
@@ -121,6 +130,50 @@ describe("createFeedbackPrompt / recordFeedback", () => {
   });
 });
 
+describe("📤 Share", () => {
+  const answer =
+    "Iron-rich foods include beans, green leafy vegetables and fortified cereals [1]. Pair them with vitamin C to help absorption [2]. " +
+    "x".repeat(0) + "\n\nReferences:\n[1] Chakudya Malawi Guidelines 2017\n[2] Chakudya Database";
+
+  test("share text drops citations and the References block, and signs off", () => {
+    const t = buildShareText(answer);
+    assert.doesNotMatch(t, /\[\d\]/);
+    assert.doesNotMatch(t, /References/);
+    assert.match(t, /Iron-rich foods include beans/);
+    assert.match(t, /— Thanzi Coach$/);
+    assert.match(buildShareText(answer, "+265 886 29 53 24"), /https:\/\/wa\.me\/265886295324/);
+  });
+
+  test("long answers are trimmed to a sentence boundary", () => {
+    const long = Array.from({ length: 60 }, (_, i) => `Sentence number ${i} about nutrition.`).join(" ");
+    const t = buildShareText(long);
+    assert.ok(t.length < 700);
+    assert.match(t.split("\n\n— Thanzi Coach")[0], /\.$/);
+  });
+
+  test("share URL decodes back to the text and stays under the limit", () => {
+    const url = buildShareUrl("Hello nsima & beans — 100%");
+    assert.equal(decodeURIComponent(url.split("text=")[1]), "Hello nsima & beans — 100%");
+    const huge = buildShareUrl("ñ ".repeat(3000));
+    assert.ok(huge.length <= 1900, String(huge.length));
+  });
+
+  test("share message exists in both languages", () => {
+    assert.match(buildShareMessage().body, /share this answer/);
+    assert.match(buildShareMessage(true).displayText, /Gawirani/);
+    assert.ok([...buildShareMessage().displayText].length <= 20);
+    assert.ok([...buildShareMessage(true).displayText].length <= 20);
+  });
+
+  test("answer lookup only works for the owner", async () => {
+    const db = fakeDb();
+    const id = await createFeedbackPrompt(db, { whatsappId: "A", question: "iron?", answer, nowMs: T0 });
+    assert.match((await getAnswerForShare(db, { id, whatsappId: "A" })).answer, /Iron-rich/);
+    assert.equal(await getAnswerForShare(db, { id, whatsappId: "B" }), null);
+    assert.equal(await getAnswerForShare({ prepare() { throw new Error("x"); } }, { id, whatsappId: "A" }), null);
+  });
+});
+
 describe("feedbackSummary / pruneFeedback", () => {
   test("counts ratings and lists recent 👎 questions", async () => {
     const db = fakeDb();
@@ -134,7 +187,7 @@ describe("feedbackSummary / pruneFeedback", () => {
     assert.deepEqual(new Set(s.recentDown), new Set(["q2", "q3"]));
   });
 
-  test("prune drops rows older than 90 days only", async () => {
+  test("prune drops rows older than 30 days only", async () => {
     const db = fakeDb();
     await createFeedbackPrompt(db, { whatsappId: "old", question: "q", answer: "a", nowMs: T0 - 100 * 86400 * 1000 });
     await createFeedbackPrompt(db, { whatsappId: "new", question: "q", answer: "a", nowMs: T0 - 10 * 86400 * 1000 });

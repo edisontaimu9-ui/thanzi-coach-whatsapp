@@ -15,19 +15,19 @@
  */
 
 export const FEEDBACK_COOLDOWN_MS = 3 * 60 * 1000;
-export const FEEDBACK_RETENTION_DAYS = 90;
+export const FEEDBACK_RETENTION_DAYS = 30;
 const MIN_ANSWER_CHARS = 120; // don't ask about one-liners
 const MAX_QUESTION_CHARS = 200;
-const MAX_ANSWER_CHARS = 300;
+const MAX_ANSWER_CHARS = 700; // enough for the 📤 Share excerpt (see buildShareText)
 
-/** Button id for a rating on feedback row `id`. */
-export function buildFeedbackId(rating, id) {
-  return `fb:${rating === "up" ? "up" : "down"}:${id}`;
+/** Button id for an action ("up" | "down" | "share") on feedback row `id`. */
+export function buildFeedbackId(action, id) {
+  return `fb:${action === "up" ? "up" : action === "share" ? "share" : "down"}:${id}`;
 }
 
-/** Parses "fb:up:42" -> { rating: "up", id: 42 }; anything else -> null. */
+/** Parses "fb:up:42" -> { rating: "up", id: 42 } ("rating" may also be "share"); else null. */
 export function parseFeedbackId(raw) {
-  const m = /^fb:(up|down):(\d{1,12})$/.exec(String(raw || ""));
+  const m = /^fb:(up|down|share):(\d{1,12})$/.exec(String(raw || ""));
   return m ? { rating: m[1], id: Number(m[2]) } : null;
 }
 
@@ -44,6 +44,7 @@ export function buildFeedbackPrompt(feedbackId, isChichewa = false) {
         buttons: [
           { id: buildFeedbackId("up", feedbackId), title: "👍 Zandithandiza" },
           { id: buildFeedbackId("down", feedbackId), title: "👎 Sizandithandiza" },
+          { id: buildFeedbackId("share", feedbackId), title: "📤 Gawirani" },
         ],
       }
     : {
@@ -51,8 +52,66 @@ export function buildFeedbackPrompt(feedbackId, isChichewa = false) {
         buttons: [
           { id: buildFeedbackId("up", feedbackId), title: "👍 Helpful" },
           { id: buildFeedbackId("down", feedbackId), title: "👎 Not helpful" },
+          { id: buildFeedbackId("share", feedbackId), title: "📤 Share" },
         ],
       };
+}
+
+// ── 📤 Share ──
+// WhatsApp gives bots no native "share" icon, so the third button replies with a link button that
+// opens WhatsApp's own chat picker (wa.me/?text=...) with the answer already written in.
+const MAX_SHARE_CHARS = 600;
+const MAX_SHARE_URL_CHARS = 1900; // WhatsApp caps CTA URLs at 2000
+
+/** Clean, forwardable excerpt of an answer: no [1] citations or References block, trimmed to a sentence. */
+export function buildShareText(answer, botNumber) {
+  let t = String(answer || "")
+    .split(/\n\s*references?\s*:/i)[0]
+    .replace(/\s*\[\d+(?:\s*,\s*\d+)*\]/g, "")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  if (t.length > MAX_SHARE_CHARS) {
+    const cut = t.slice(0, MAX_SHARE_CHARS);
+    const stop = Math.max(cut.lastIndexOf(". "), cut.lastIndexOf("! "), cut.lastIndexOf("? "), cut.lastIndexOf("\n"));
+    t = stop > MAX_SHARE_CHARS * 0.6 ? cut.slice(0, stop + 1).trim() : cut.slice(0, cut.lastIndexOf(" ")).trim() + "…";
+  }
+  const digits = String(botNumber || "").replace(/\D/g, "");
+  const signature = digits ? `\n\n— Thanzi Coach (https://wa.me/${digits})` : "\n\n— Thanzi Coach";
+  return t + signature;
+}
+
+/** https://wa.me/?text=... guaranteed under the CTA URL limit (shrinks the text if needed). */
+export function buildShareUrl(text) {
+  let t = String(text || "");
+  let url = `https://wa.me/?text=${encodeURIComponent(t)}`;
+  while (url.length > MAX_SHARE_URL_CHARS && t.length > 20) {
+    t = t.slice(0, Math.floor(t.length * 0.85)).trimEnd() + "…";
+    url = `https://wa.me/?text=${encodeURIComponent(t)}`;
+  }
+  return url;
+}
+
+/** { body, displayText } for the link-button message sent when 📤 Share is tapped. */
+export function buildShareMessage(isChichewa = false) {
+  return isChichewa
+    ? { body: "Dinani pansipa kuti musankhe munthu woti mum'gawire yankho ili.", displayText: "📤 Gawirani yankho" }
+    : { body: "Tap below to pick a chat and share this answer.", displayText: "📤 Share answer" };
+}
+
+/** The stored answer text for feedback row `id`, only if it belongs to `whatsappId`; else null. */
+export async function getAnswerForShare(db, { id, whatsappId }) {
+  if (!db || !whatsappId || !Number.isFinite(id)) return null;
+  try {
+    const row = await db
+      .prepare(`SELECT answer, question FROM feedback WHERE id = ?1 AND whatsapp_id = ?2`)
+      .bind(id, whatsappId)
+      .first();
+    return row?.answer ? { answer: String(row.answer), question: String(row.question || "") } : null;
+  } catch (err) {
+    console.error("Feedback share lookup failed:", err);
+    return null;
+  }
 }
 
 /** The reply after a tap. */
