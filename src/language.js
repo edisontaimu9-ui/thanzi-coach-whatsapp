@@ -112,3 +112,30 @@ export async function learnLanguage(db, whatsappId, previous, text) {
   if (!next.language) return false;
   return saveLanguageState(db, whatsappId, next);
 }
+
+// ── Env-aware helpers (moved from src/index.js) ──
+
+// Plain small-talk (greetings, "how are you", thanks, bye) doesn't need
+// Chakudya's nutrition retrieval at all — routing it through /rag/ask just
+// burns a request and comes back with an odd, citation-laden answer to a
+// question that was never really about food/health data. Handled with an
+// instant tappable prompt list instead (see sendPromptList), matched on the
+// whole message (trimmed, punctuation stripped) so it doesn't misfire on a
+// real question that merely starts with "hi" or similar. Replies in
+// whichever language the greeting itself was in. See detectGreetingLanguage
+// in ./detectors.js.
+
+// True when replies to this person should be in Chichewa: a clear signal in `text` wins, otherwise
+// the remembered language (see ./language.js). Used by the notice/feedback paths that don't already
+// hold the language state.
+export async function isChichewaFor(env, from, text) {
+  if (!chichewaRepliesEnabled(env)) return false;
+  return resolveLanguage(text, await getLanguageState(env.DB, from)) === "ny";
+}
+
+// Replies are pure English by default. Chichewa questions are still UNDERSTOOD (translated to
+// English before searching), but the bot only answers in Chichewa — menus, notices, buttons and
+// translated answers — when the Worker variable CHICHEWA_REPLIES is set to "on".
+export function chichewaRepliesEnabled(env) {
+  return String(env.CHICHEWA_REPLIES || "").toLowerCase() === "on";
+}
