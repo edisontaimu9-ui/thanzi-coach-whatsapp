@@ -2,6 +2,11 @@ name = "thanzi-coach-whatsapp"
 main = "src/index.js"
 compatibility_date = "2026-08-01"
 
+# Keep variables that are set in the Cloudflare dashboard (e.g. BOT_WA_NUMBER, CHICHEWA_REPLIES,
+# RATE_LIMIT_PER_MINUTE) when the GitHub Action deploys. Without this, every deploy deletes any
+# plain variable that isn't listed under [vars] below. Secrets are never affected.
+keep_vars = true
+
 [vars]
 PHONE_NUMBER_ID = "1269406299584594"
 
