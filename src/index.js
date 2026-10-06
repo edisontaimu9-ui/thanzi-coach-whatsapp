@@ -171,6 +171,7 @@
 import { buildRateLimitNotice, checkRateLimit, getLimits, pruneRateLimits } from "./rateLimit.js";
 import { parseFeedbackId, pruneFeedback, shouldAskFeedback, splitReferences } from "./feedback.js";
 import { verifyWebhookSignature } from "./webhookSignature.js";
+import { parseAdminCommand, runAdminCommand } from "./adminCommands.js";
 import { buildEditNotice, normalizeIncomingMessage } from "./editedMessages.js";
 import { buildFailureReply, classifyFailure } from "./fallbackReplies.js";
 import { detectComparisonFollowUp, detectDriRequest, detectDrugInteractionQuery, detectEnergyRequirementRequest, detectFoodComparison, detectFoodQuantity, detectLabelRequest, detectMealPlanEdit, detectMealPlanRequest, detectMultiFoodList, detectServingOnly, detectSubstituteRequest, isBareCancel, isMenuEscape, looksLikeBarcode, looksLikeBareFoodName, parseGreeting } from "./detectors.js";
@@ -392,6 +393,17 @@ async function handleIncomingMessage(request, env, ctx) {
 // `opts.learnLanguage` is true only for typed text: voice transcripts are forced to English and
 // tapped menu rows are English example prompts, so neither says anything about the person's language.
 async function handleTextMessage(userText, from, env, ctx, opts = {}) {
+  // Admin commands ("stats", "stats 7", "feedback", "admin") — only from ADMIN_PHONE, and only when the
+  // whole message is a command, so everyone else (and the admin's normal questions) is unaffected.
+  // See ./adminCommands.js.
+  if (env.ADMIN_PHONE && from === env.ADMIN_PHONE && !opts.skipAdmin) {
+    const adminCmd = parseAdminCommand(userText);
+    if (adminCmd) {
+      await sendWhatsAppReply(from, await runAdminCommand(adminCmd, env.DB), env);
+      return;
+    }
+  }
+
   // Flexible openers: "hello Thanzi, how much iron do I need" -> answer the question with the
   // greeting stripped. (A bare greeting / generic help request is handled further down, after the
   // in-progress flow handlers, so a mid-flow answer is never swallowed.) See parseGreeting.
