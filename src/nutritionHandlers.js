@@ -8,6 +8,7 @@
 
 import { askChakudya, compareFoodsViaChakudya, getFoodLabel, getFoodSubstitutes, lookupBarcode, lookupDri, lookupFoodByName, lookupFoodsViaBatch, resolveUnknownFoodsViaRag, searchDrugInteractions } from "./chakudyaClient.js";
 import { getLastSessionContext, saveLastFoodContext, saveLastSessionContext } from "./context.js";
+import { formatEer, formatEerMissing, planEerLookup, runEer } from "./eerLookup.js";
 import { detectPretermEnergyRequest, formatPretermEnergy, isPretermMention, lookupPretermEnergy } from "./pretermEnergy.js";
 import { detectComparisonFollowUp, detectDriRequest, detectDrugInteractionQuery, detectEnergyRequirementRequest, detectFoodComparison, detectLabelRequest, detectMealPlanEdit, detectMealPlanRequest, detectMultiFoodList, detectSubstituteRequest, looksLikeBarcode } from "./detectors.js";
 import { calculateEnergyRequirement } from "./energy.js";
@@ -115,6 +116,29 @@ if (looksLikeBarcode(userText)) {
   const energyReq = detectEnergyRequirementRequest(userText);
   if (energyReq && !isPretermMention(userText)) {
     topic.name = "energy";
+    // Infants, children, adolescents, pregnancy and lactation need the activity-adjusted EER, not just
+    // resting energy (see ./eerLookup.js). Anyone else, and any failure, keeps the original calculator.
+    const eerPlan = planEerLookup(energyReq);
+    if (eerPlan?.missing) {
+      await sendWhatsAppReply(from, formatEerMissing(eerPlan), env);
+      return true;
+    }
+    if (eerPlan) {
+      try {
+        const eerResults = await runEer(eerPlan, env);
+        const resting = calculateEnergyRequirement({
+          sex: energyReq.sex,
+          ageYears: energyReq.age,
+          weightKg: energyReq.weightKg,
+          heightCm: energyReq.heightCm,
+          stressFactorKey: null,
+        });
+        await sendWhatsAppReply(from, formatEer(eerPlan, eerResults, resting), env);
+        return true;
+      } catch (err) {
+        console.error("EER lookup failed, using the basic calculator:", err?.message || err);
+      }
+    }
     const result = calculateEnergyRequirement({
       sex: energyReq.sex,
       ageYears: energyReq.age,

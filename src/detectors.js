@@ -514,13 +514,33 @@ function extractClinicalDemographics(t) {
   if (/\b(woman|women|female|girl|lady)\b/i.test(t)) sex = "female";
   if (/\b(man|men|male|boy)\b/i.test(t)) sex = "male";
 
+  // Age: years ("6 years old", "6yo"), and for babies months / weeks ("7 month old baby", "10 weeks old").
+  // "N months" counts as an age only with "old" or a baby/child word nearby, so a duration like
+  // "for 3 months" isn't mistaken for one. A "baby is 4 months" in a lactation question is returned as
+  // ageMonths too; the energy router decides which person it describes.
   let age = null;
+  let ageMonths = null;
   const ageMatch = t.match(/\b(\d{1,3})\s*[- ]?\s*(?:years?|yrs?|yo)\s*(?:old)?\b/i);
   if (ageMatch) age = Number(ageMatch[1]);
+  const babyWord = /\b(baby|babies|babe|babes|infant|toddler|newborn|child|kid|boy|girl|breastfed|breastfeeding)\b/i.test(t);
+  const monthsMatch = t.match(/\b(\d{1,2})\s*[- ]?\s*(?:months?|mos?|mths?)\b(\s*[- ]?\s*old)?/i);
+  const weeksMatch = t.match(/\b(\d{1,2})\s*[- ]?\s*weeks?\b(\s*[- ]?\s*old)?/i);
+  if (monthsMatch && (monthsMatch[2] || babyWord)) ageMonths = Number(monthsMatch[1]);
+  else if (weeksMatch && (weeksMatch[2] || babyWord)) ageMonths = Math.round((Number(weeksMatch[1]) / 4.345) * 10) / 10;
+  if (ageMonths !== null) {
+    if (age === null) age = Math.round((ageMonths / 12) * 100) / 100;
+    else if (monthsMatch) age = Math.round((age + ageMonths / 12) * 100) / 100; // "2 years 3 months"
+  }
 
   let weightKg = null;
   const weightMatch = t.match(/\b(\d{2,3}(?:\.\d+)?)\s*kg\b/i);
   if (weightMatch) weightKg = Number(weightMatch[1]);
+  // Babies weigh under 10 kg ("7kg", "3.5 kg"). Single-digit weights are only read for infants, so a goal
+  // like "lose 5kg" in an adult request is never mistaken for the person's weight.
+  if (weightKg === null && (ageMonths !== null || (age !== null && age < 3) || /\b(baby|babies|infant|newborn)\b/i.test(t))) {
+    const small = t.match(/\b(\d{1,2}(?:\.\d+)?)\s*kg\b/i);
+    if (small) weightKg = Number(small[1]);
+  }
 
   let heightCm = null;
   const heightCmMatch = t.match(/\b(\d{2,3}(?:\.\d+)?)\s*cm\b/i);
@@ -540,7 +560,7 @@ function extractClinicalDemographics(t) {
 
   const stressConditionKey = detectStressCondition(t);
 
-  return { age, sex, weightKg, heightCm, conditions, stressConditionKey, rawText: t };
+  return { age, ageMonths, sex, weightKg, heightCm, conditions, stressConditionKey, rawText: t };
 }
 
 // --- Meal plan requests (Groq, direct — see generateMealPlan in index.js) ---
