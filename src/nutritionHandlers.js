@@ -8,6 +8,7 @@
 
 import { askChakudya, compareFoodsViaChakudya, getFoodLabel, getFoodSubstitutes, lookupBarcode, lookupDri, lookupFoodByName, lookupFoodsViaBatch, resolveUnknownFoodsViaRag, searchDrugInteractions } from "./chakudyaClient.js";
 import { getLastSessionContext, saveLastFoodContext, saveLastSessionContext } from "./context.js";
+import { detectPretermEnergyRequest, formatPretermEnergy, isPretermMention, lookupPretermEnergy } from "./pretermEnergy.js";
 import { detectComparisonFollowUp, detectDriRequest, detectDrugInteractionQuery, detectEnergyRequirementRequest, detectFoodComparison, detectLabelRequest, detectMealPlanEdit, detectMealPlanRequest, detectMultiFoodList, detectSubstituteRequest, looksLikeBarcode } from "./detectors.js";
 import { calculateEnergyRequirement } from "./energy.js";
 import { SUBREQUEST_LIMIT_MESSAGE } from "./errors.js";
@@ -96,8 +97,23 @@ if (looksLikeBarcode(userText)) {
   // two intents can otherwise overlap (both parse the same demographic
   // fields) and a bare calculation request should never fall through to
   // meal-plan generation.
+  // Preterm infants have their own reference ranges (Chakudya MCP tool, see ./pretermEnergy.js); the
+  // adult calculator below can't answer them. If the lookup fails, the message falls through to the
+  // normal nutrition search instead of the adult "I need sex, age, height" prompt.
+  const pretermReq = detectPretermEnergyRequest(userText);
+  if (pretermReq) {
+    topic.name = "energy";
+    try {
+      const result = await lookupPretermEnergy(pretermReq.weightKg, env);
+      await sendWhatsAppReply(from, formatPretermEnergy(result, pretermReq.weightKg), env);
+      return true;
+    } catch (err) {
+      console.error("Preterm energy lookup failed, falling back to search:", err?.message || err);
+    }
+  }
+
   const energyReq = detectEnergyRequirementRequest(userText);
-  if (energyReq) {
+  if (energyReq && !isPretermMention(userText)) {
     topic.name = "energy";
     const result = calculateEnergyRequirement({
       sex: energyReq.sex,
