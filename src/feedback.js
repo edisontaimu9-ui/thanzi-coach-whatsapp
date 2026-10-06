@@ -19,7 +19,7 @@ export const FEEDBACK_RETENTION_DAYS = 30;
 const MIN_ANSWER_CHARS = 40; // skip trivial one-liners; everything else gets the action buttons
 const MAX_QUESTION_CHARS = 200;
 const MAX_SOURCES_CHARS = 800;
-const MAX_ANSWER_CHARS = 700; // enough for the 📤 Share excerpt (see buildShareText)
+const MAX_ANSWER_CHARS = 1500; // enough for the 📤 Share excerpt (see buildShareText)
 
 const ACTIONS = ["up", "down", "share", "details"];
 
@@ -70,24 +70,49 @@ export function buildFeedbackPrompt(feedbackId, isChichewa = false, hasDetails =
 // ── 📤 Share ──
 // WhatsApp gives bots no native "share" icon, so the third button replies with a link button that
 // opens WhatsApp's own chat picker (wa.me/?text=...) with the answer already written in.
-const MAX_SHARE_CHARS = 600;
+const MAX_SHARE_CHARS = 1200;
+const SHARE_SIZES = [MAX_SHARE_CHARS, 1000, 800, 650, 500, 400, 300];
 const MAX_SHARE_URL_CHARS = 1900; // WhatsApp caps CTA URLs at 2000
 
-/** Clean, forwardable excerpt of an answer: no [1] citations or References block, trimmed to a sentence. */
-export function buildShareText(answer, botNumber) {
+// A short line with no closing punctuation and no bullet ("Typical Malawi DASH servings") is a heading.
+function isHeadingLine(line) {
+  const l = line.trim();
+  return l.length > 0 && l.length < 70 && !/^[•\-*\d]/.test(l) && !/[.!?:)”"]$/.test(l);
+}
+
+/**
+ * Clean, forwardable excerpt of an answer: no [1] citations or References block. Short answers are
+ * shared whole. Longer ones are cut at the last paragraph break (else the last line / sentence / word)
+ * that fits `maxChars`, never leaving a heading hanging at the end, and marked as an excerpt.
+ */
+export function buildShareText(answer, botNumber, maxChars = MAX_SHARE_CHARS) {
   let t = String(answer || "")
     .split(/\n\s*references?\s*:/i)[0]
     .replace(/\s*\[\d+(?:\s*,\s*\d+)*\]/g, "")
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
-  if (t.length > MAX_SHARE_CHARS) {
-    const cut = t.slice(0, MAX_SHARE_CHARS);
-    const stop = Math.max(cut.lastIndexOf(". "), cut.lastIndexOf("! "), cut.lastIndexOf("? "), cut.lastIndexOf("\n"));
-    t = stop > MAX_SHARE_CHARS * 0.6 ? cut.slice(0, stop + 1).trim() : cut.slice(0, cut.lastIndexOf(" ")).trim() + "…";
+  let truncated = false;
+  if (t.length > maxChars) {
+    truncated = true;
+    const cut = t.slice(0, maxChars);
+    const floor = maxChars * 0.4;
+    const para = cut.lastIndexOf("\n\n");
+    const line = cut.lastIndexOf("\n");
+    const sentence = Math.max(cut.lastIndexOf(". "), cut.lastIndexOf("! "), cut.lastIndexOf("? "));
+    if (para > floor) t = cut.slice(0, para);
+    else if (line > floor) t = cut.slice(0, line);
+    else if (sentence > floor) t = cut.slice(0, sentence + 1);
+    else t = cut.slice(0, Math.max(cut.lastIndexOf(" "), 1));
+    t = t.trim();
+    // Never end on a dangling heading: drop trailing heading lines (keep at least the first paragraph).
+    let lines = t.split("\n");
+    while (lines.length > 1 && (lines[lines.length - 1].trim() === "" || isHeadingLine(lines[lines.length - 1]))) lines.pop();
+    t = lines.join("\n").trim();
   }
   const digits = String(botNumber || "").replace(/\D/g, "");
-  const signature = digits ? `\n\n— Thanzi Coach (https://wa.me/${digits})` : "\n\n— Thanzi Coach";
+  const link = digits ? ` (https://wa.me/${digits})` : "";
+  const signature = truncated ? `\n\n…\n— More in Thanzi Coach${link}` : `\n\n— Thanzi Coach${link}`;
   return t + signature;
 }
 
@@ -100,6 +125,18 @@ export function buildShareUrl(text) {
     url = `https://wa.me/?text=${encodeURIComponent(t)}`;
   }
   return url;
+}
+
+/**
+ * The share link for an answer: the longest excerpt (down to 300 chars) whose encoded URL fits the
+ * limit, always cut cleanly by buildShareText. Use this instead of buildShareUrl(buildShareText(..)).
+ */
+export function buildShareLink(answer, botNumber) {
+  for (const size of SHARE_SIZES) {
+    const url = `https://wa.me/?text=${encodeURIComponent(buildShareText(answer, botNumber, size))}`;
+    if (url.length <= MAX_SHARE_URL_CHARS) return url;
+  }
+  return buildShareUrl(buildShareText(answer, botNumber, SHARE_SIZES[SHARE_SIZES.length - 1]));
 }
 
 /** { body, displayText } for the link-button message sent when 📤 Share is tapped. */

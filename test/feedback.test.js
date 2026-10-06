@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   buildFeedbackId, parseFeedbackId, shouldAskFeedback, buildFeedbackPrompt, buildFeedbackThanks,
   feedbackCounts, listFeedback,
-  buildShareText, buildShareUrl, buildShareMessage, getAnswerForShare, splitReferences, buildDetailsMessage,
+  buildShareText, buildShareUrl, buildShareLink, buildShareMessage, getAnswerForShare, splitReferences, buildDetailsMessage,
   createFeedbackPrompt, recordFeedback, feedbackSummary, pruneFeedback, FEEDBACK_COOLDOWN_MS,
 } from "../src/feedback.js";
 
@@ -125,14 +125,14 @@ describe("prompt text", () => {
 describe("createFeedbackPrompt / recordFeedback", () => {
   test("creates a row (truncated); every answer gets one unless a cooldown is requested", async () => {
     const db = fakeDb();
-    const id = await createFeedbackPrompt(db, { whatsappId: "A", question: "q".repeat(500), answer: "a".repeat(900), nowMs: T0 });
+    const id = await createFeedbackPrompt(db, { whatsappId: "A", question: "q".repeat(500), answer: "a".repeat(2000), nowMs: T0 });
     assert.equal(id, 1);
     assert.equal(await createFeedbackPrompt(db, { whatsappId: "A", question: "q", answer: "a", nowMs: T0 + 1000 }), 2); // no cooldown by default
     db.rows.length = 0;
-    assert.equal(await createFeedbackPrompt(db, { whatsappId: "A", question: "q".repeat(500), answer: "a".repeat(900), sources: "s".repeat(2000), nowMs: T0, cooldownMs: FEEDBACK_COOLDOWN_MS }), 3);
+    assert.equal(await createFeedbackPrompt(db, { whatsappId: "A", question: "q".repeat(500), answer: "a".repeat(2000), sources: "s".repeat(2000), nowMs: T0, cooldownMs: FEEDBACK_COOLDOWN_MS }), 3);
     assert.equal(db.rows[0].sources.length, 800);
     assert.equal(db.rows[0].question.length, 200);
-    assert.equal(db.rows[0].answer.length, 700);
+    assert.equal(db.rows[0].answer.length, 1500);
     assert.equal(await createFeedbackPrompt(db, { whatsappId: "A", question: "q", answer: "a", nowMs: T0 + 1000, cooldownMs: FEEDBACK_COOLDOWN_MS }), null);
     assert.equal(await createFeedbackPrompt(db, { whatsappId: "B", question: "q", answer: "a", nowMs: T0 + 1000, cooldownMs: FEEDBACK_COOLDOWN_MS }), 4);
     assert.equal(await createFeedbackPrompt(db, { whatsappId: "A", question: "q", answer: "a", nowMs: T0 + FEEDBACK_COOLDOWN_MS + 1000, cooldownMs: FEEDBACK_COOLDOWN_MS }), 5);
@@ -171,11 +171,29 @@ describe("📤 Share", () => {
     assert.match(buildShareText(answer, "+265 886 29 53 24"), /https:\/\/wa\.me\/265886295324/);
   });
 
-  test("long answers are trimmed to a sentence boundary", () => {
-    const long = Array.from({ length: 60 }, (_, i) => `Sentence number ${i} about nutrition.`).join(" ");
-    const t = buildShareText(long);
-    assert.ok(t.length < 700);
-    assert.match(t.split("\n\n— Thanzi Coach")[0], /\.$/);
+  test("a short answer is shared whole, without the excerpt marker", () => {
+    const t = buildShareText("Beans are rich in iron [1].\n\nPair them with vitamin C [2].");
+    assert.match(t, /Pair them with vitamin C\./);
+    assert.doesNotMatch(t, /More in/);
+    assert.match(t, /— Thanzi Coach$/);
+  });
+
+  test("long answers are cut at a paragraph break and marked as an excerpt", () => {
+    const para = (i) => `Paragraph ${i} says something useful about nutrition. `.repeat(8).trim();
+    const long = [1, 2, 3, 4, 5, 6].map(para).join("\n\n");
+    const t = buildShareText(long, "265886295324");
+    assert.ok(t.length < 1400);
+    assert.match(t, /\n\n…\n— More in Thanzi Coach \(https:\/\/wa\.me\/265886295324\)$/);
+    const body = t.split("\n\n…")[0];
+    assert.ok(body.split("\n\n").every((p) => /^Paragraph \d says/.test(p)), "only whole paragraphs");
+  });
+
+  test("never ends on a dangling heading (the reported DASH bug)", () => {
+    const intro = "The DASH diet is a heart-healthy eating pattern that lowers blood pressure. ".repeat(12).trim();
+    const answer = `${intro}\n\nTypical Malawi DASH servings\n• Vegetables – 2 handfuls per day, e.g. tomatoes, carrots, leafy greens. ${"More detail here. ".repeat(40)}`;
+    const t = buildShareText(answer, undefined, 900);
+    assert.doesNotMatch(t, /Typical Malawi DASH servings\s*(\n\n…|$)/);
+    assert.match(t, /More in Thanzi Coach/);
   });
 
   test("share URL decodes back to the text and stays under the limit", () => {
@@ -183,6 +201,16 @@ describe("📤 Share", () => {
     assert.equal(decodeURIComponent(url.split("text=")[1]), "Hello nsima & beans — 100%");
     const huge = buildShareUrl("ñ ".repeat(3000));
     assert.ok(huge.length <= 1900, String(huge.length));
+  });
+
+  test("buildShareLink picks the longest excerpt that fits the URL limit", () => {
+    const long = Array.from({ length: 80 }, (_, i) => `Sentence ${i} with ñ and 100% accents & symbols.`).join(" ");
+    const url = buildShareLink(long, "265886295324");
+    assert.ok(url.length <= 1900, String(url.length));
+    const text = decodeURIComponent(url.split("text=")[1]);
+    assert.match(text, /More in Thanzi Coach/);
+    const short = buildShareLink("Beans are rich in iron.", undefined);
+    assert.equal(decodeURIComponent(short.split("text=")[1]), "Beans are rich in iron.\n\n— Thanzi Coach");
   });
 
   test("share message exists in both languages", () => {

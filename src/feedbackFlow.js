@@ -4,7 +4,7 @@
  * Split out of src/index.js with no behaviour change.
  */
 
-import { buildDetailsMessage, buildFeedbackPrompt, buildFeedbackThanks, buildShareMessage, buildShareText, buildShareUrl, createFeedbackPrompt, getAnswerForShare, recordFeedback } from "./feedback.js";
+import { buildDetailsMessage, buildFeedbackPrompt, buildFeedbackThanks, buildShareMessage, buildShareLink, createFeedbackPrompt, getAnswerForShare, recordFeedback } from "./feedback.js";
 import { sendWhatsAppInteractiveButtons, sendWhatsAppInteractiveCtaUrl, sendWhatsAppReply } from "./whatsapp.js";
 import { isChichewaFor } from "./language.js";
 
@@ -30,7 +30,7 @@ export async function handleFeedbackTap({ rating, id }, from, env) {
     if (!stored || !stored.sources) return;
     const isNy = await isChichewaFor(env, from, stored.question);
     const msg = buildDetailsMessage(stored.sources, isNy);
-    const url = buildShareUrl(buildShareText(stored.answer, env.BOT_WA_NUMBER));
+    const url = buildShareLink(stored.answer, env.BOT_WA_NUMBER);
     await sendWhatsAppInteractiveCtaUrl(from, { body: msg.body, displayText: msg.displayText, url }, env).catch(async (err) => {
       console.error("Details send failed:", err);
       await sendWhatsAppReply(from, `📚 *${isNy ? "Magwero" : "Sources"}*\n${stored.sources}`, env).catch(() => {});
@@ -44,7 +44,7 @@ export async function handleFeedbackTap({ rating, id }, from, env) {
     const stored = await getAnswerForShare(env.DB, { id, whatsappId: from });
     if (!stored) return;
     const msg = buildShareMessage(await isChichewaFor(env, from, stored.question));
-    const url = buildShareUrl(buildShareText(stored.answer, env.BOT_WA_NUMBER));
+    const url = buildShareLink(stored.answer, env.BOT_WA_NUMBER);
     await sendWhatsAppInteractiveCtaUrl(from, { body: msg.body, displayText: msg.displayText, url }, env).catch((err) => {
       console.error("Share link send failed:", err);
     });
