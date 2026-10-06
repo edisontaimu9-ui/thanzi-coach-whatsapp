@@ -13,6 +13,7 @@
  */
 
 import { feedbackCounts, listFeedback } from "./feedback.js";
+import { topicCounts } from "./topics.js";
 
 const MAX_DAYS = 90;
 
@@ -60,6 +61,7 @@ export function buildStatsText(days, s) {
   lines.push(`Messages: ${s.messages}`);
   lines.push(s.errors > 0 ? `⚠️ Errors: ${s.errors}${rate}` : "Errors: 0 ✅");
   if (s.byType.length) lines.push("Mix: " + s.byType.map((t) => `${t.type} ${t.n}`).join(" · "));
+  if (s.topics?.length) lines.push("Topics: " + s.topics.map((t) => `${t.label} ${t.n}`).join(" · "));
   const total = s.up + s.down;
   if (total > 0) lines.push(`Feedback: 👍 ${s.up} · 👎 ${s.down} (${Math.round((s.up / total) * 100)}% helpful)`);
   return lines.join("\n");
@@ -93,6 +95,7 @@ export async function getAdminStats(db, days, nowMs = Date.now()) {
         .all(),
     ]);
     const fb = await feedbackCounts(db, days, nowMs);
+    const topics = (await topicCounts(db, days, nowMs)).filter((t) => t.topic !== "admin").slice(0, 5);
     return {
       totalUsers: Number(totalUsers) || 0,
       newUsers: Number(newUsers) || 0,
@@ -100,6 +103,7 @@ export async function getAdminStats(db, days, nowMs = Date.now()) {
       messages: Number(messages) || 0,
       errors: Number(errors) || 0,
       byType: (byType?.results || []).map((r) => ({ type: String(r.type), n: Number(r.n) })),
+      topics,
       up: fb.up,
       down: fb.down,
     };

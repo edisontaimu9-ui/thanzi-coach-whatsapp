@@ -172,6 +172,7 @@ import { buildRateLimitNotice, checkRateLimit, getLimits, pruneRateLimits } from
 import { parseFeedbackId, pruneFeedback, shouldAskFeedback, splitReferences } from "./feedback.js";
 import { verifyWebhookSignature } from "./webhookSignature.js";
 import { parseAdminCommand, runAdminCommand } from "./adminCommands.js";
+import { recordTopic, pruneTopics } from "./topics.js";
 import { buildEditNotice, normalizeIncomingMessage } from "./editedMessages.js";
 import { buildFailureReply, classifyFailure } from "./fallbackReplies.js";
 import { detectComparisonFollowUp, detectDriRequest, detectDrugInteractionQuery, detectEnergyRequirementRequest, detectFoodComparison, detectFoodQuantity, detectLabelRequest, detectMealPlanEdit, detectMealPlanRequest, detectMultiFoodList, detectServingOnly, detectSubstituteRequest, isBareCancel, isMenuEscape, looksLikeBarcode, looksLikeBareFoodName, parseGreeting } from "./detectors.js";
@@ -237,6 +238,7 @@ export default {
     ctx.waitUntil(sendDailySummary(env));
     ctx.waitUntil(pruneRateLimits(env.DB));
     ctx.waitUntil(pruneFeedback(env.DB));
+    ctx.waitUntil(pruneTopics(env.DB));
   },
 };
 
@@ -393,12 +395,25 @@ async function handleIncomingMessage(request, env, ctx) {
 // `opts.learnLanguage` is true only for typed text: voice transcripts are forced to English and
 // tapped menu rows are English example prompts, so neither says anything about the person's language.
 async function handleTextMessage(userText, from, env, ctx, opts = {}) {
+  // Usage by topic (./topics.js): the router below sets topic.name as it picks a branch; one
+  // timestamp + topic row (no phone number, no text) is written when the message is done.
+  const topic = { name: "other" };
+  try {
+    return await handleTextMessageInner(userText, from, env, ctx, opts, topic);
+  } finally {
+    const done = recordTopic(env.DB, topic.name);
+    if (ctx?.waitUntil) ctx.waitUntil(done);
+  }
+}
+
+async function handleTextMessageInner(userText, from, env, ctx, opts = {}, topic = { name: "other" }) {
   // Admin commands ("stats", "stats 7", "feedback", "admin") — only from ADMIN_PHONE, and only when the
   // whole message is a command, so everyone else (and the admin's normal questions) is unaffected.
   // See ./adminCommands.js.
   if (env.ADMIN_PHONE && from === env.ADMIN_PHONE && !opts.skipAdmin) {
     const adminCmd = parseAdminCommand(userText);
     if (adminCmd) {
+      topic.name = "admin";
       await sendWhatsAppReply(from, await runAdminCommand(adminCmd, env.DB), env);
       return;
     }
@@ -419,6 +434,7 @@ async function handleTextMessage(userText, from, env, ctx, opts = {}) {
   const langState = repliesInChichewa ? await getLanguageState(env.DB, from) : null;
   const langCommand = repliesInChichewa ? detectLanguageCommand(userText) : null;
   if (langCommand) {
+    topic.name = "language";
     await saveLanguageState(env.DB, from, { language: langCommand, locked: true, en_streak: 0 });
     await sendWhatsAppReply(from, languageConfirmation(langCommand), env);
     return;
@@ -429,6 +445,7 @@ async function handleTextMessage(userText, from, env, ctx, opts = {}) {
   // Menu escape: "menu" / "help" / "start over" abandon whatever guided flow is in progress and show
   // the menu (otherwise a mid-flow "menu" is swallowed as an invalid answer). See isMenuEscape.
   if (isMenuEscape(userText)) {
+    topic.name = "menu";
     await clearAllScreeningSessions(from, env);
     await sendPromptList(from, repliesInChichewa && lang === "ny" ? "ny" : "en", env);
     return;
@@ -462,12 +479,14 @@ async function handleTextMessage(userText, from, env, ctx, opts = {}) {
   // because "school child" also contains the word "child".
   const schoolAgeScreeningReply = await handleSchoolAgeScreeningFlow(userText, from, env);
   if (schoolAgeScreeningReply !== null) {
+    topic.name = "screening";
     await sendWhatsAppReply(from, schoolAgeScreeningReply, env);
     return;
   }
 
   const screeningReply = await handleUnder5ScreeningFlow(userText, from, env);
   if (screeningReply !== null) {
+    topic.name = "screening";
     await sendWhatsAppReply(from, screeningReply, env);
     return;
   }
@@ -478,6 +497,7 @@ async function handleTextMessage(userText, from, env, ctx, opts = {}) {
   // distinct session kind, so the two flows never collide.
   const pregnantScreeningReply = await handlePregnantPostpartumScreeningFlow(userText, from, env);
   if (pregnantScreeningReply !== null) {
+    topic.name = "screening";
     await sendWhatsAppReply(from, pregnantScreeningReply, env);
     return;
   }
@@ -486,6 +506,7 @@ async function handleTextMessage(userText, from, env, ctx, opts = {}) {
   // pregnant flow because "a pregnant woman" also matches the adult flow's population words.
   const adultScreeningReply = await handleAdultScreeningFlow(userText, from, env);
   if (adultScreeningReply !== null) {
+    topic.name = "screening";
     await sendWhatsAppReply(from, adultScreeningReply, env);
     return;
   }
@@ -495,6 +516,7 @@ async function handleTextMessage(userText, from, env, ctx, opts = {}) {
   // immediately unless that offer already started a session for this number.
   const refeedingRiskReply = await handleAdultRefeedingRiskFlow(userText, from, env);
   if (refeedingRiskReply !== null) {
+    topic.name = "screening";
     await sendWhatsAppReply(from, refeedingRiskReply, env);
     return;
   }
@@ -503,6 +525,7 @@ async function handleTextMessage(userText, from, env, ctx, opts = {}) {
   // calculator: its result is never used for malnutrition classification.
   const weightEstimateReply = await handleWeightEstimateFlow(userText, from, env);
   if (weightEstimateReply !== null) {
+    topic.name = "calculator";
     await sendWhatsAppReply(from, weightEstimateReply, env);
     return;
   }
@@ -511,6 +534,7 @@ async function handleTextMessage(userText, from, env, ctx, opts = {}) {
   // Also a standalone calculator: its result is never used for malnutrition classification.
   const heightEstimateReply = await handleHeightEstimateFlow(userText, from, env);
   if (heightEstimateReply !== null) {
+    topic.name = "calculator";
     await sendWhatsAppReply(from, heightEstimateReply, env);
     return;
   }
@@ -519,6 +543,7 @@ async function handleTextMessage(userText, from, env, ctx, opts = {}) {
   // screening attached — see ./bmiCheck.js.
   const bmiCheckReply = await handleBmiCheckFlow(userText, from, env);
   if (bmiCheckReply !== null) {
+    topic.name = "calculator";
     await sendWhatsAppReply(from, bmiCheckReply, env);
     return;
   }
@@ -527,6 +552,7 @@ async function handleTextMessage(userText, from, env, ctx, opts = {}) {
   // ./weightChangeCheck.js.
   const weightChangeReply = await handleWeightChangeFlow(userText, from, env);
   if (weightChangeReply !== null) {
+    topic.name = "calculator";
     await sendWhatsAppReply(from, weightChangeReply, env);
     return;
   }
@@ -534,6 +560,7 @@ async function handleTextMessage(userText, from, env, ctx, opts = {}) {
   // "quick calculators" with none of the four named (typed, or tapped from the greeting list's
   // "Quick calculators" row): show the tappable which-calculator menu. See ./estimateMenu.js.
   if (detectEstimateMenuRequest(userText)) {
+    topic.name = "calculator";
     await sendWhatsAppInteractiveList(
       from,
       { body: ESTIMATE_MENU_BODY, buttonText: ESTIMATE_MENU_BUTTON, sections: estimateMenuSections() },
@@ -545,6 +572,7 @@ async function handleTextMessage(userText, from, env, ctx, opts = {}) {
   // "malnutrition screening" with no population named (typed, or tapped from the greeting list's
   // "Malnutrition screening" row): show the tappable who-to-screen menu. See ./screeningMenu.js.
   if (detectScreeningMenuRequest(userText)) {
+    topic.name = "screening";
     await sendWhatsAppInteractiveList(
       from,
       { body: SCREENING_MENU_BODY, buttonText: SCREENING_MENU_BUTTON, sections: screeningMenuSections() },
@@ -556,18 +584,21 @@ async function handleTextMessage(userText, from, env, ctx, opts = {}) {
   // Bare greeting ("hi", "good morning Thanzi") or a generic "I want help on Thanzi" with no topic:
   // show the tappable menu. Anything with a real question after the greeting was stripped above.
   if (isBareCancel(userText)) {
+    topic.name = "menu";
     // Active flows handle their own "cancel" above; reaching here means nothing was in progress.
     await sendWhatsAppReply(from, "There's nothing to cancel right now. Type *menu* to see what I can do. 🙏", env);
     return;
   }
   const greeting = parseGreeting(userText);
   if (greeting && !greeting.rest) {
+    topic.name = "menu";
     const menuLang = !repliesInChichewa ? "en" : langState?.locked ? langState.language : greeting.lang === "ny" ? "ny" : lang;
     await sendPromptList(from, menuLang, env);
     return;
   }
 
   if (looksLikeBarcode(userText)) {
+    topic.name = "barcode";
     const barcode = userText.trim();
     const found = await lookupBarcode(barcode, env);
     if (found) {
@@ -584,6 +615,7 @@ async function handleTextMessage(userText, from, env, ctx, opts = {}) {
   // not a guess from the LLM.
   const substituteFor = detectSubstituteRequest(userText);
   if (substituteFor) {
+    topic.name = "substitutes";
     const data = await getFoodSubstitutes(substituteFor, env);
     const formatted = formatSubstitutes(data);
     if (formatted) {
@@ -599,6 +631,7 @@ async function handleTextMessage(userText, from, env, ctx, opts = {}) {
   // retrieval, so severity/effects/implications come through verbatim.
   const drugQuery = detectDrugInteractionQuery(userText);
   if (drugQuery) {
+    topic.name = "drug_interactions";
     const matches = await searchDrugInteractions(drugQuery, env);
     if (matches) {
       await sendWhatsAppReply(from, formatDrugInteractions(matches, drugQuery), env);
@@ -611,6 +644,7 @@ async function handleTextMessage(userText, from, env, ctx, opts = {}) {
   // miss falls through to /rag/ask rather than dead-ending.
   const labelFor = detectLabelRequest(userText);
   if (labelFor) {
+    topic.name = "nutrition_label";
     const labelResult = await getFoodLabel(labelFor, env);
     if (labelResult) {
       await sendWhatsAppReply(from, formatNutritionLabel(labelResult.label, labelResult.foodName), env);
@@ -623,6 +657,7 @@ async function handleTextMessage(userText, from, env, ctx, opts = {}) {
   // resolved from whatever age/sex/life-stage hints are in the message.
   const driReq = detectDriRequest(userText);
   if (driReq) {
+    topic.name = "dri";
     const data = await lookupDri(driReq, env);
     const answer = formatDriAnswer(data, driReq);
     if (answer) {
@@ -641,6 +676,7 @@ async function handleTextMessage(userText, from, env, ctx, opts = {}) {
   // meal-plan generation.
   const energyReq = detectEnergyRequirementRequest(userText);
   if (energyReq) {
+    topic.name = "energy";
     const result = calculateEnergyRequirement({
       sex: energyReq.sex,
       ageYears: energyReq.age,
@@ -673,6 +709,7 @@ async function handleTextMessage(userText, from, env, ctx, opts = {}) {
   // Groq would otherwise have to guess.
   const mealPlanReq = detectMealPlanRequest(userText);
   if (mealPlanReq) {
+    topic.name = "meal_plan";
     const energyResult = calculateEnergyRequirement({
       sex: mealPlanReq.sex,
       ageYears: mealPlanReq.age,
@@ -702,6 +739,7 @@ async function handleTextMessage(userText, from, env, ctx, opts = {}) {
   // applyMealPlanEdit above.
   const mealPlanEdit = detectMealPlanEdit(userText);
   if (mealPlanEdit) {
+    topic.name = "meal_plan";
     const prevPlan = await getLastSessionContext(from, "meal_plan", env);
     if (prevPlan?.meals?.length) {
       const edited = await applyMealPlanEdit(mealPlanEdit, prevPlan, env);
@@ -746,6 +784,7 @@ async function handleTextMessage(userText, from, env, ctx, opts = {}) {
   // and last_session_context (migrations/0005) for the stored context.
   const comparisonFollowUp = detectComparisonFollowUp(userText);
   if (comparisonFollowUp) {
+    topic.name = "food_compare";
     const prevContext = await getLastSessionContext(from, "comparison", env);
     if (prevContext?.foods?.length) {
       const merged = [...new Set([...prevContext.foods, ...comparisonFollowUp])].slice(0, 6);
@@ -772,6 +811,7 @@ async function handleTextMessage(userText, from, env, ctx, opts = {}) {
   // than 2 of the named foods resolve, fall through to /rag/ask.
   const foodsToCompare = detectFoodComparison(userText);
   if (foodsToCompare) {
+    topic.name = "food_compare";
     const comparison = await compareFoodsViaChakudya(foodsToCompare, env);
     if (comparison) {
       await sendWhatsAppReply(from, comparison, env);
@@ -813,6 +853,7 @@ async function handleTextMessage(userText, from, env, ctx, opts = {}) {
   // comes back as SUBREQUEST_LIMIT_MESSAGE and we fall through to 3) the
   // per-food split/batch approach as the safety net, same as before.
   if (!foodsToCompare) {
+    topic.name = "food_lookup";
     const wholePhraseMatch = await lookupFoodByName(userText.trim(), env);
     // lookupFoodByName's local->fuzzy(pg_trgm)->external cascade always
     // picks SOME "best guess" internally, even when nothing genuinely
@@ -870,6 +911,7 @@ async function handleTextMessage(userText, from, env, ctx, opts = {}) {
   // on queries shaped like this.
   const foodQty = detectFoodQuantity(userText);
   if (foodQty) {
+    topic.name = "food_lookup";
     const scaled = await answerFoodQuantity(foodQty.food, foodQty.grams, env);
     if (scaled) {
       await sendWhatsAppReply(from, scaled.text, env);
@@ -890,6 +932,7 @@ async function handleTextMessage(userText, from, env, ctx, opts = {}) {
   // arithmetic against the SAME base measure every time.
   const servingOnly = detectServingOnly(userText);
   if (servingOnly) {
+    topic.name = "food_lookup";
     const context = await getLastFoodContext(from, env);
     if (context) {
       const scaled = scaleFoodToGrams(context, servingOnly.grams);
@@ -928,6 +971,7 @@ async function handleTextMessage(userText, from, env, ctx, opts = {}) {
   // non-Malawian food /foods/search can't see, resolved instead via the
   // external cascade), it's added as an extra option rather than dropped.
   if (looksLikeBareFoodName(userText)) {
+    topic.name = "food_lookup";
     const query = userText.trim();
     const topResult = await lookupFoodByName(query, env);
 
@@ -982,6 +1026,7 @@ async function handleTextMessage(userText, from, env, ctx, opts = {}) {
   if (shouldClassifyIntent(userText)) {
     const { intent, lang: classifiedLang } = await classifyHelpIntent(userText, env);
     if (intent === "menu") {
+      topic.name = "menu";
       const menuLang = !repliesInChichewa ? "en" : langState?.locked ? langState.language : classifiedLang === "ny" ? "ny" : lang;
       await sendPromptList(from, menuLang, env);
       return;
@@ -990,6 +1035,7 @@ async function handleTextMessage(userText, from, env, ctx, opts = {}) {
 
   // Chichewa question (or Chichewa/English mix): search in English, then translate the answer
   // back. Every step falls back to English, never to a worse answer. See ./chichewa.js.
+  topic.name = "qa";
   const inChichewa = lang === "ny"; // reply in Chichewa (only when CHICHEWA_REPLIES is on)
   let searchText = userText;
   if (isChichewaMessage(userText) || inChichewa) { // understanding the question always works

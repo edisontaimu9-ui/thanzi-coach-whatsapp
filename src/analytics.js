@@ -4,6 +4,7 @@
  * Split out of src/index.js with no behaviour change.
  */
 
+import { topicCounts } from "./topics.js";
 import { feedbackCounts, feedbackSummary, listFeedback } from "./feedback.js";
 import { sendWhatsAppReply } from "./whatsapp.js";
 
@@ -157,6 +158,8 @@ export async function handleStats(url, env) {
     const fb = await feedbackCounts(env.DB, days);
 
     const stats = {
+      // What people ask about (counts only, so safe behind STATS_TOKEN): [{ topic, label, n }].
+      topics: await topicCounts(env.DB, days),
       feedback_up: fb.up,
       feedback_down: fb.down,
       feedback_satisfaction: fb.up + fb.down > 0 ? Number((fb.up / (fb.up + fb.down)).toFixed(4)) : null,

@@ -29,13 +29,14 @@ describe("parseAdminCommand", () => {
 });
 
 describe("formatting", () => {
-  const stats = { totalUsers: 120, newUsers: 5, activeUsers: 18, messages: 200, errors: 2, byType: [{ type: "text", n: 170 }, { type: "interactive", n: 30 }], up: 9, down: 3 };
+  const stats = { totalUsers: 120, newUsers: 5, activeUsers: 18, messages: 200, errors: 2, byType: [{ type: "text", n: 170 }, { type: "interactive", n: 30 }], topics: [{ topic: "qa", label: "Nutrition Q&A", n: 80 }, { topic: "food_lookup", label: "Food lookup", n: 40 }], up: 9, down: 3 };
   test("stats text has the numbers, error rate, mix and feedback", () => {
     const t = buildStatsText(7, stats);
     assert.match(t, /last 7 days/);
     assert.match(t, /120 total · 5 new · 18 active/);
     assert.match(t, /Errors: 2 \(1\.0%\)/);
     assert.match(t, /text 170 · interactive 30/);
+    assert.match(t, /Topics: Nutrition Q&A 80 · Food lookup 40/);
     assert.match(t, /👍 9 · 👎 3 \(75% helpful\)/);
     assert.match(buildStatsText(1, { ...stats, errors: 0, up: 0, down: 0, byType: [] }), /last 24 hours[\s\S]*Errors: 0 ✅/);
     assert.doesNotMatch(buildStatsText(1, { ...stats, up: 0, down: 0 }), /Feedback/);
@@ -57,6 +58,7 @@ function fakeDb() {
         bind: () => ({
           async first() { return val; },
           async all() {
+            if (/topic_events/.test(sql)) return { results: [{ topic: "qa", n: 80 }, { topic: "admin", n: 5 }, { topic: "food_lookup", n: 40 }] };
             if (/GROUP BY type/.test(sql)) return { results: [{ type: "text", n: 170 }, { type: "interactive", n: 30 }] };
             if (/GROUP BY rating/.test(sql)) return { results: [{ rating: "up", n: 9 }, { rating: "down", n: 3 }] };
             return { results: [{ id: 1, rated_at: "t", rating: "down", question: "bad q", answer: "a" }] };
@@ -71,7 +73,7 @@ function fakeDb() {
 describe("D1 reads", () => {
   test("getAdminStats gathers everything", async () => {
     const s = await getAdminStats(fakeDb(), 7);
-    assert.deepEqual(s, { totalUsers: 120, newUsers: 5, activeUsers: 18, messages: 200, errors: 2, byType: [{ type: "text", n: 170 }, { type: "interactive", n: 30 }], up: 9, down: 3 });
+    assert.deepEqual(s, { totalUsers: 120, newUsers: 5, activeUsers: 18, messages: 200, errors: 2, byType: [{ type: "text", n: 170 }, { type: "interactive", n: 30 }], topics: [{ topic: "qa", label: "Nutrition Q&A", n: 80 }, { topic: "food_lookup", label: "Food lookup", n: 40 }], up: 9, down: 3 });
   });
   test("runAdminCommand routes each command", async () => {
     assert.equal(await runAdminCommand({ type: "help" }, fakeDb()), ADMIN_HELP_TEXT);
