@@ -1,6 +1,6 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { planEerLookup, formatEer, formatEerMissing } from "../src/eerLookup.js";
+import { planEerLookup, formatEer, formatEerMissing, parseWeightStatus } from "../src/eerLookup.js";
 import { detectEnergyRequirementRequest } from "../src/detectors.js";
 
 const plan = (text) => {
@@ -68,6 +68,45 @@ describe("planEerLookup scope", () => {
   });
 });
 
+describe("child weight status (BMI-for-age)", () => {
+  const d = detectEnergyRequirementRequest("energy requirements for a 10 year old girl 42kg 138cm");
+
+  test("overweight children use the overweight equations; others the normal band", () => {
+    assert.equal(planEerLookup(d, "overweight").calls[0].args.life_stage, "child_girl_3_18_overweight");
+    assert.equal(planEerLookup(d, "normal").calls[0].args.life_stage, "child_girl_9_18_normal");
+    assert.equal(planEerLookup(d, "thin").calls[0].args.life_stage, "child_girl_9_18_normal");
+    assert.equal(planEerLookup(d).calls[0].args.life_stage, "child_girl_9_18_normal");
+    const boy = detectEnergyRequirementRequest("energy requirements for a 4 year old boy 22kg 100cm");
+    assert.equal(planEerLookup(boy, "overweight").calls[0].args.life_stage, "child_boy_3_18_overweight");
+    assert.equal(planEerLookup(boy, "normal").calls[0].args.life_stage, "child_boy_3_8_normal");
+  });
+
+  test("parses the school-age tool (WHO 2007: status words)", () => {
+    for (const [status, want] of [["overweight", "overweight"], ["obesity", "overweight"], ["normal", "normal"], ["thinness", "thin"], ["severe thinness", "thin"], ["weird", "unknown"]]) {
+      assert.equal(parseWeightStatus("bmi_for_age_classify", { status }), want, status);
+    }
+    assert.equal(parseWeightStatus("bmi_for_age_classify", undefined), "unknown");
+  });
+
+  test("parses the under-5 tool (WHO 2006: percentile / z-score)", () => {
+    const r = (percentile, z) => ({ indicators: { bmi_for_age: { available: true, percentile, z_score: z } } });
+    assert.equal(parseWeightStatus("under5_anthropometric_assessment", r(100, 4.11)), "overweight");
+    assert.equal(parseWeightStatus("under5_anthropometric_assessment", r(85, 1.04)), "overweight");
+    assert.equal(parseWeightStatus("under5_anthropometric_assessment", r(50, 0)), "normal");
+    assert.equal(parseWeightStatus("under5_anthropometric_assessment", r(1, -2.3)), "thin");
+    assert.equal(parseWeightStatus("under5_anthropometric_assessment", { indicators: { bmi_for_age: { available: false } } }), "unknown");
+    assert.equal(parseWeightStatus("under5_anthropometric_assessment", {}), "unknown");
+  });
+
+  test("the reply explains overweight, thin and unknown statuses", () => {
+    const stats = [{ eer_kcal_per_day: 1500 }, { eer_kcal_per_day: 1700 }, { eer_kcal_per_day: 1900 }];
+    assert.match(formatEer(planEerLookup(d, "overweight"), stats, null), /overweight children were used/);
+    assert.match(formatEer(planEerLookup(d, "thin"), stats, null), /thinness.*see a health worker/s);
+    assert.match(formatEer(planEerLookup(d, "unknown"), stats, null), /could not be checked/);
+    assert.doesNotMatch(formatEer(planEerLookup(d, "normal"), stats, null), /⚠️/);
+  });
+});
+
 describe("missing inputs", () => {
   test("each group asks only for what it needs, with an example", () => {
     let p = plan("calorie needs of a toddler");
@@ -97,7 +136,7 @@ describe("formatEer", () => {
     assert.match(t, /boy, 15 years/);
     assert.match(t, /Sedentary: \*2,335 kcal\/day\*/);
     assert.match(t, /Low active: \*2,579 kcal\/day\*/);
-    assert.match(t, /healthy-weight child/);
+    assert.match(t, /choose the activity level/);
     assert.doesNotMatch(t, /Resting energy/);
   });
   test("pregnancy and lactation show the add-on", () => {

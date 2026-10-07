@@ -8,7 +8,7 @@
 
 import { askChakudya, compareFoodsViaChakudya, getFoodLabel, getFoodSubstitutes, lookupBarcode, lookupDri, lookupFoodByName, lookupFoodsViaBatch, resolveUnknownFoodsViaRag, searchDrugInteractions } from "./chakudyaClient.js";
 import { getLastSessionContext, saveLastFoodContext, saveLastSessionContext } from "./context.js";
-import { formatEer, formatEerMissing, planEerLookup, runEer } from "./eerLookup.js";
+import { assessChildWeightStatus, formatEer, formatEerMissing, planEerLookup, runEer } from "./eerLookup.js";
 import { detectPretermEnergyRequest, formatPretermEnergy, isPretermMention, lookupPretermEnergy } from "./pretermEnergy.js";
 import { detectComparisonFollowUp, detectDriRequest, detectDrugInteractionQuery, detectEnergyRequirementRequest, detectFoodComparison, detectLabelRequest, detectMealPlanEdit, detectMealPlanRequest, detectMultiFoodList, detectSubstituteRequest, looksLikeBarcode } from "./detectors.js";
 import { calculateEnergyRequirement } from "./energy.js";
@@ -118,7 +118,11 @@ if (looksLikeBarcode(userText)) {
     topic.name = "energy";
     // Infants, children, adolescents, pregnancy and lactation need the activity-adjusted EER, not just
     // resting energy (see ./eerLookup.js). Anyone else, and any failure, keeps the original calculator.
-    const eerPlan = planEerLookup(energyReq);
+    let eerPlan = planEerLookup(energyReq);
+    if (eerPlan?.scope === "child" && !eerPlan.missing) {
+      // Children above the 85th BMI percentile use IOM's overweight equations: check BMI-for-age first.
+      eerPlan = planEerLookup(energyReq, await assessChildWeightStatus(energyReq, env));
+    }
     if (eerPlan?.missing) {
       await sendWhatsAppReply(from, formatEerMissing(eerPlan), env);
       return true;
