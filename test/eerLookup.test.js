@@ -24,11 +24,33 @@ describe("age parsing in energy requests", () => {
 });
 
 describe("planEerLookup scope", () => {
-  test("adults, unknown ages and clinical stress keep the existing calculator", () => {
-    assert.equal(plan("calculate energy requirements for a 45 year old man, 70kg, 175cm"), null);
-    assert.equal(plan("energy requirements for an 80 year old woman 50kg 155cm"), null);
+  test("unknown ages and clinical stress keep the existing calculator", () => {
     assert.equal(plan("energy requirements"), null);
     assert.equal(plan("energy requirements for a 5 year old boy with sepsis 20kg 110cm"), null);
+    assert.equal(plan("energy requirements for a 45 year old man with sepsis 70kg 175cm"), null);
+  });
+
+  test("adults: IOM stage chosen by BMI, three activity levels", () => {
+    const normal = plan("calculate energy requirements for a 45 year old man, 70kg, 175cm"); // BMI 22.9
+    assert.equal(normal.scope, "adult");
+    assert.equal(normal.bmiGroup, "normal");
+    assert.deepEqual(normal.calls.map((c) => c.args.life_stage), Array(3).fill("adult_male_normal_bmi18_5_25"));
+    assert.deepEqual(normal.calls.map((c) => c.args.physical_activity_level), ["sedentary", "low_active", "active"]);
+    assert.equal(normal.calls[0].args.age_years, 45);
+    assert.equal(normal.label, "man, 45 years");
+    const high = plan("energy requirements for a 30 year old woman 90kg 160cm"); // BMI 35.2
+    assert.equal(high.bmiGroup, "high");
+    assert.equal(high.calls[0].args.life_stage, "adult_female_overweight_obese_bmi25plus");
+    const womanNormal = plan("energy requirements for a 50 year old woman 60kg 165cm");
+    assert.equal(womanNormal.calls[0].args.life_stage, "adult_female_normal_bmi18_25");
+    const low = plan("energy requirements for an 80 year old woman 40kg 155cm"); // BMI 16.6
+    assert.equal(low.bmiGroup, "low");
+    assert.equal(low.calls[0].args.life_stage, "adult_female_normal_bmi18_25");
+  });
+
+  test("age 18 uses the adolescent equations, 19 the adult ones", () => {
+    assert.equal(plan("energy requirements for an 18 year old boy 65kg 175cm").scope, "child");
+    assert.equal(plan("energy requirements for a 19 year old man 65kg 175cm").scope, "adult");
   });
 
   test("infant: weight-only call to the infant stage", () => {
@@ -113,6 +135,9 @@ describe("missing inputs", () => {
     assert.equal(p.scope, "infant");
     assert.deepEqual(p.missing, ["age (e.g. 7 months)", "weight (kg)"]);
     assert.match(formatEerMissing(p), /I still need: age \(e\.g\. 7 months\), weight \(kg\)\./);
+    p = plan("energy requirements for a 40 year old");
+    assert.equal(p.scope, "adult");
+    assert.deepEqual(p.missing, ["sex (male or female)", "weight (kg)", "height (cm)"]);
     p = plan("energy requirements for a 5 year old");
     assert.deepEqual(p.missing, ["sex (boy or girl)", "weight (kg)", "height (cm)"]);
     p = plan("energy requirements for a pregnant woman 28 years 65kg 163cm");
@@ -138,6 +163,17 @@ describe("formatEer", () => {
     assert.match(t, /Low active: \*2,579 kcal\/day\*/);
     assert.match(t, /choose the activity level/);
     assert.doesNotMatch(t, /Resting energy/);
+  });
+  test("adult: BMI notes, activity legend and footer", () => {
+    const stats = [{ eer_kcal_per_day: 2300 }, { eer_kcal_per_day: 2500 }, { eer_kcal_per_day: 2800 }];
+    const normal = formatEer(plan("energy requirements for a 45 year old man, 70kg, 175cm"), stats, { equation: "Harris-Benedict BEE", baseKcalPerDay: 1602 });
+    assert.match(normal, /man, 45 years/);
+    assert.match(normal, /Sedentary: \*2,300 kcal\/day\*/);
+    assert.match(normal, /Low active: about 30–60 min/);
+    assert.match(normal, /Resting energy \(Harris-Benedict BEE\): 1,602 kcal\/day/);
+    assert.doesNotMatch(normal, /⚠️/);
+    assert.match(formatEer(plan("energy requirements for a 30 year old woman 90kg 160cm"), stats, null), /BMI 35\.2 \(25 or above\).*not to lose it/s);
+    assert.match(formatEer(plan("energy requirements for an 80 year old woman 40kg 155cm"), stats, null), /BMI 16\.6 \(below 18\.5\).*see a health worker/s);
   });
   test("pregnancy and lactation show the add-on", () => {
     const preg = plan("energy requirements for a pregnant woman 28 years 65kg 163cm in her second trimester");

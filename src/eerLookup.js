@@ -8,8 +8,9 @@
  * activity-adjusted Estimated Energy Requirement (IOM/DRI) from the Chakudya MCP tool
  * iom_dri_eer_calculator, with the resting value shown alongside.
  *
- * Out of scope here (they keep the existing calculator unchanged): adults without pregnancy or
- * lactation, and anyone with a clinical stress condition (burns, sepsis...). If the tool is
+ * Adults (19+) get the same activity-adjusted EER, with the equation set chosen by BMI (normal 18.5-25,
+ * or overweight/obese 25+). Out of scope here (they keep the existing calculator unchanged): anyone
+ * with a clinical stress condition (burns, sepsis...) and requests with no usable age. If the tool is
  * unavailable the caller falls back to the existing calculator.
  *
  * planEerLookup / formatEer are pure; runEer makes the MCP calls. Tests: test/eerLookup.test.js.
@@ -59,7 +60,8 @@ function scopeOf(d) {
   // For lactation questions ageMonths is the baby's; otherwise it is the subject's.
   const subjectMonths = d.ageMonths ?? (d.age !== null ? d.age * 12 : null);
   if (subjectMonths !== null && subjectMonths < 36) return "infant";
-  if (d.age !== null && d.age >= 3 && d.age < 18) return "child";
+  if (d.age !== null && d.age >= 3 && d.age < 19) return "child"; // IOM's child equations run to age 18
+  if (d.age !== null && d.age >= 19) return "adult";
   if (d.age === null && BABY_WORD.test(text)) return "infant";
   if (d.age === null && CHILD_WORD.test(text) && !/\b(man|men|woman|women|adult)\b/i.test(text)) return "child";
   return null;
@@ -103,6 +105,36 @@ export function planEerLookup(d, weightStatus = "normal") {
       scope,
       weightStatus,
       label: `${sexWord}, ${age} years`,
+      weightKg: d.weightKg,
+      calls: ACTIVITY.map(([pal, name]) => ({
+        label: name,
+        args: { life_stage: stage, age_years: age, weight_kg: d.weightKg, height_cm: d.heightCm, physical_activity_level: pal },
+      })),
+    };
+  }
+
+  if (scope === "adult") {
+    if (!d.sex) missing.push("sex (male or female)");
+    if (d.weightKg === null) missing.push("weight (kg)");
+    if (d.heightCm === null) missing.push("height (cm)");
+    if (missing.length) return { scope, missing, example: "energy needs of a 40 year old woman, 65kg, 160cm" };
+    const age = Math.floor(d.age);
+    const sexWord = d.sex === "male" ? "male" : "female";
+    const bmi = Math.round((d.weightKg / Math.pow(d.heightCm / 100, 2)) * 10) / 10;
+    const bmiGroup = bmi < 18.5 ? "low" : bmi < 25 ? "normal" : "high";
+    // IOM adult equations: BMI 18.5-25 (normal) or 25+ (overweight/obese). Below 18.5 has no set of its own,
+    // so the normal-weight set is used with a note.
+    const stage =
+      bmiGroup === "high"
+        ? `adult_${sexWord}_overweight_obese_bmi25plus`
+        : sexWord === "male"
+          ? "adult_male_normal_bmi18_5_25"
+          : "adult_female_normal_bmi18_25";
+    return {
+      scope,
+      bmi,
+      bmiGroup,
+      label: `${d.sex === "male" ? "man" : "woman"}, ${age} years`,
       weightKg: d.weightKg,
       calls: ACTIVITY.map(([pal, name]) => ({
         label: name,
@@ -222,6 +254,16 @@ export function formatEer(plan, results, resting) {
   if (resting && Number.isFinite(resting.baseKcalPerDay)) {
     lines.push("", `Resting energy (${resting.equation}): ${kcal(resting.baseKcalPerDay)} kcal/day`);
   }
+  if (plan.scope === "adult") {
+    const note = {
+      high: `BMI ${plan.bmi} (25 or above): equations for overweight adults were used (energy to maintain current weight, not to lose it).`,
+      low: `BMI ${plan.bmi} (below 18.5): these estimates are for maintaining weight. Someone underweight may need more energy to gain. Please see a health worker.`,
+    }[plan.bmiGroup];
+    if (note) lines.push("", `⚠️ ${note}`);
+  }
+  if (plan.scope !== "infant") {
+    lines.push("", "_Sedentary: daily living only · Low active: about 30–60 min of brisk activity a day · Active: 60+ min a day_");
+  }
   if (plan.scope === "child") {
     const note = {
       overweight: "BMI-for-age is above normal: equations for overweight children were used (energy to maintain current weight, not to lose it).",
@@ -232,7 +274,7 @@ export function formatEer(plan, results, resting) {
   }
   lines.push(
     "",
-    plan.scope === "child"
+    plan.scope === "child" || plan.scope === "adult"
       ? "_Estimate (IOM/DRI); choose the activity level that fits. Reference only, not a substitute for individual assessment._"
       : "_Estimate (IOM/DRI) for a healthy-weight person. Reference only, not a substitute for individual assessment._"
   );
