@@ -6,11 +6,12 @@
  * repliesInChichewa }) and returns true when it handled (replied to) the message.
  */
 
+import { sendResult } from "./feedbackFlow.js";
 import { answerFoodQuantity, lookupFoodByName, lookupWiderTierFoodByName, searchFoodCandidates } from "./chakudyaClient.js";
 import { getLastFoodContext, saveLastFoodContext } from "./context.js";
 import { detectFoodQuantity, detectServingOnly, looksLikeBareFoodName } from "./detectors.js";
 import { formatFoodResult, getFoodItemName, isDirectFoodMatch, normalizeFoodName, scaleFoodToGrams, toFoodContext } from "./formatting.js";
-import { sendFoodOptionsList, sendWhatsAppReply } from "./whatsapp.js";
+import { sendFoodOptionsList } from "./whatsapp.js";
 
 /** Food quantity ("100g nsima"), serving-only follow-ups, and bare food-name lookups. Returns true when handled. */
 export async function handleFoodQueries(c) {
@@ -26,7 +27,7 @@ export async function handleFoodQueries(c) {
     topic.name = "food_lookup";
     const scaled = await answerFoodQuantity(foodQty.food, foodQty.grams, env);
     if (scaled) {
-      await sendWhatsAppReply(from, scaled.text, env);
+      await sendResult(c, scaled.text, "Nutrient values come from the Chakudya Nutrition Registry (Malawi food composition data and linked sources), per the amount shown. Reference only.");
       ctx.waitUntil(
         saveLastFoodContext(from, { ...scaled.context, lastShownGrams: foodQty.grams }, env)
       );
@@ -49,7 +50,7 @@ export async function handleFoodQueries(c) {
     if (context) {
       const scaled = scaleFoodToGrams(context, servingOnly.grams);
       if (scaled) {
-        await sendWhatsAppReply(from, scaled, env);
+        await sendResult(c, scaled, "Nutrient values come from the Chakudya Nutrition Registry (Malawi food composition data and linked sources), per the amount shown. Reference only.");
         ctx.waitUntil(
           saveLastFoodContext(from, { ...context, lastShownGrams: servingOnly.grams }, env)
         );
@@ -90,7 +91,7 @@ export async function handleFoodQueries(c) {
     if (topResult && isDirectFoodMatch(query, topResult)) {
       const card = formatFoodResult(topResult);
       if (card) {
-        await sendWhatsAppReply(from, card, env);
+        await sendResult(c, card, "Nutrient values come from the Chakudya Nutrition Registry (Malawi food composition data and linked sources), per the amount shown. Reference only.");
         const context = toFoodContext(topResult);
         if (context) ctx.waitUntil(saveLastFoodContext(from, context, env));
         return true;

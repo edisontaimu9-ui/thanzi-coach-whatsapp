@@ -119,6 +119,10 @@ describe("prompt text", () => {
     assert.equal(shouldAskFeedback("short"), false);
     assert.equal(shouldAskFeedback("x".repeat(200)), true);
     assert.equal(shouldAskFeedback(undefined), false);
+    // error notices are never rated, however long
+    assert.equal(shouldAskFeedback("Sorry, the BMI check couldn't be completed: tool failed. Please try again in a moment."), false);
+    assert.equal(shouldAskFeedback("⏳ The nutrition database is busy right now, so I couldn't answer that. Nothing is lost, please send it again."), false);
+    assert.equal(shouldAskFeedback("Nsima: 112 kcal, 2.5 g protein per 100 g. A real result card that is long enough to rate."), true);
   });
 });
 

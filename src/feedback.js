@@ -46,9 +46,12 @@ export function splitReferences(answer) {
   return { main: text.slice(0, m.index).trim(), references: m[1].trim() };
 }
 
-/** Only substantive answers are worth asking about. */
+/** Only substantive answers and results are worth asking about (not errors or one-liners). */
 export function shouldAskFeedback(answer) {
-  return typeof answer === "string" && answer.trim().length >= MIN_ANSWER_CHARS;
+  if (typeof answer !== "string") return false;
+  const t = answer.trim();
+  // Error notices ("Sorry, the BMI check couldn't be completed...", "⏳ The database is busy...") are not results.
+  return t.length >= MIN_ANSWER_CHARS && !/^(?:Sorry\b|⏳)/.test(t);
 }
 
 /**

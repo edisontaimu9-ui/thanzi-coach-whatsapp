@@ -288,6 +288,23 @@ export function formatEer(plan, results, resting) {
   return lines.join("\n");
 }
 
+/** Text for 📚 See details on an energy result: method, activity levels, assumptions. */
+export function formatEerDetails(plan, resting) {
+  const stage = String(plan.calls?.[0]?.args?.life_stage || "").replace(/_/g, " ");
+  const lines = [`Method: IOM/DRI estimated energy requirement equations (${stage}), calculated by the Chakudya server.`];
+  if (plan.scope !== "infant") {
+    lines.push("Activity levels: sedentary = daily living only; low active = about 30–60 min of brisk activity a day; active = 60+ min a day.");
+  }
+  if (plan.scope === "pregnancy") lines.push("The extra energy of pregnancy is added to the non-pregnant equation for the trimester you gave.");
+  if (plan.scope === "lactation") lines.push("The energy cost of milk production (less expected weight loss) is added to the non-pregnant equation.");
+  if (plan.weightStatus === "overweight" || plan.bmiGroup === "high") {
+    lines.push("Equations for overweight people estimate the energy to maintain current weight, not to lose it.");
+  }
+  if (resting?.equation) lines.push(`Resting energy shown: ${resting.equation}.`);
+  lines.push("Assumes a stable weight. Individual needs vary; measured calorimetry is preferred when clinically indicated.");
+  return lines.join("\n");
+}
+
 /** The "I still need..." message for a plan with missing inputs. */
 export function formatEerMissing(plan) {
   return `I still need: ${plan.missing.join(", ")}.\n\nFor example: “${plan.example}”.`;

@@ -15,11 +15,37 @@ import { detectHeightEstimateTrigger, handleHeightEstimateFlow } from "./heightE
 import { detectPregnantPostpartumScreeningTrigger, handlePregnantPostpartumScreeningFlow } from "./pregnantPostpartumScreening.js";
 import { detectSchoolAgeScreeningTrigger, handleSchoolAgeScreeningFlow } from "./schoolAgeScreening.js";
 import { SCREENING_MENU_BODY, SCREENING_MENU_BUTTON, detectScreeningMenuRequest, screeningMenuSections } from "./screeningMenu.js";
-import { clearAllScreeningSessions } from "./screeningShared.js";
+import { askForFeedback } from "./feedbackFlow.js";
+import { shouldAskFeedback } from "./feedback.js";
+import { clearAllScreeningSessions, isCancel, loadSession } from "./screeningShared.js";
 import { detectUnder5ScreeningTrigger, handleUnder5ScreeningFlow } from "./under5Screening.js";
 import { detectWeightChangeTrigger, handleWeightChangeFlow } from "./weightChangeCheck.js";
 import { detectWeightEstimateTrigger, handleWeightEstimateFlow } from "./weightEstimate.js";
 import { sendPromptList, sendWhatsAppInteractiveList, sendWhatsAppReply } from "./whatsapp.js";
+
+const SCREENING_DETAILS =
+  "Uses WHO growth standards and Malawi national nutrition guidelines through the Chakudya server. A screening aid only, not a diagnosis. Please send anyone who looks unwell to a health facility.";
+const CALCULATOR_DETAILS = {
+  bmi_check: "BMI is classified with published reference tables (WHO / national for adults, WHO BMI-for-age for children). Reference only, not a substitute for a full nutrition assessment.",
+  weight_estimate: "Estimated from body measurements with published equations in the Chakudya server. This estimate is never used for malnutrition classification.",
+  height_estimate: "Estimated from body measurements with published equations in the Chakudya server. This estimate is never used for malnutrition classification.",
+  weight_change_check: "Percent weight change and its significance come from a hospital dietetics anthropometry guideline in the Chakudya server. Reference only, not a substitute for individual clinical assessment.",
+  adult_refeeding_risk: "ASPEN consensus criteria for refeeding syndrome risk (expert consensus). Not a substitute for individual clinical assessment.",
+};
+
+// Sends a guided-flow reply. When the flow has just finished (its session is gone and the person did not
+// cancel) the reply is a RESULT, so the 👍/👎/Share/See details buttons follow it; mid-flow questions and
+// "please send a number" prompts never get them. The session check runs after the reply is sent.
+async function sendFlowReply(c, reply, kind, details) {
+  const { from, env, ctx, userText, lang } = c;
+  await sendWhatsAppReply(from, reply, env);
+  if (!shouldAskFeedback(reply) || isCancel(userText)) return;
+  const task = (async () => {
+    if (await loadSession(kind, from, env)) return;
+    await askForFeedback(from, userText, reply, "", env, lang === "ny", details);
+  })().catch((err) => console.error("flow feedback failed:", err));
+  if (ctx?.waitUntil) ctx.waitUntil(task);
+}
 
 /** Multi-turn guided flows (screenings and calculators). Returns true when the message was handled. */
 export async function handleGuidedFlows(c) {
@@ -54,14 +80,14 @@ export async function handleGuidedFlows(c) {
   const schoolAgeScreeningReply = await handleSchoolAgeScreeningFlow(userText, from, env);
   if (schoolAgeScreeningReply !== null) {
     topic.name = "screening";
-    await sendWhatsAppReply(from, schoolAgeScreeningReply, env);
+    await sendFlowReply(c, schoolAgeScreeningReply, "school_age_screening", SCREENING_DETAILS);
     return true;
   }
 
   const screeningReply = await handleUnder5ScreeningFlow(userText, from, env);
   if (screeningReply !== null) {
     topic.name = "screening";
-    await sendWhatsAppReply(from, screeningReply, env);
+    await sendFlowReply(c, screeningReply, "under5_screening", SCREENING_DETAILS);
     return true;
   }
 
@@ -72,7 +98,7 @@ export async function handleGuidedFlows(c) {
   const pregnantScreeningReply = await handlePregnantPostpartumScreeningFlow(userText, from, env);
   if (pregnantScreeningReply !== null) {
     topic.name = "screening";
-    await sendWhatsAppReply(from, pregnantScreeningReply, env);
+    await sendFlowReply(c, pregnantScreeningReply, "pregnant_postpartum_screening", SCREENING_DETAILS);
     return true;
   }
 
@@ -81,7 +107,7 @@ export async function handleGuidedFlows(c) {
   const adultScreeningReply = await handleAdultScreeningFlow(userText, from, env);
   if (adultScreeningReply !== null) {
     topic.name = "screening";
-    await sendWhatsAppReply(from, adultScreeningReply, env);
+    await sendFlowReply(c, adultScreeningReply, "adult_screening", SCREENING_DETAILS);
     return true;
   }
 
@@ -91,7 +117,7 @@ export async function handleGuidedFlows(c) {
   const refeedingRiskReply = await handleAdultRefeedingRiskFlow(userText, from, env);
   if (refeedingRiskReply !== null) {
     topic.name = "screening";
-    await sendWhatsAppReply(from, refeedingRiskReply, env);
+    await sendFlowReply(c, refeedingRiskReply, "adult_refeeding_risk", CALCULATOR_DETAILS.adult_refeeding_risk);
     return true;
   }
 
@@ -100,7 +126,7 @@ export async function handleGuidedFlows(c) {
   const weightEstimateReply = await handleWeightEstimateFlow(userText, from, env);
   if (weightEstimateReply !== null) {
     topic.name = "calculator";
-    await sendWhatsAppReply(from, weightEstimateReply, env);
+    await sendFlowReply(c, weightEstimateReply, "weight_estimate", CALCULATOR_DETAILS.weight_estimate);
     return true;
   }
 
@@ -109,7 +135,7 @@ export async function handleGuidedFlows(c) {
   const heightEstimateReply = await handleHeightEstimateFlow(userText, from, env);
   if (heightEstimateReply !== null) {
     topic.name = "calculator";
-    await sendWhatsAppReply(from, heightEstimateReply, env);
+    await sendFlowReply(c, heightEstimateReply, "height_estimate", CALCULATOR_DETAILS.height_estimate);
     return true;
   }
 
@@ -118,7 +144,7 @@ export async function handleGuidedFlows(c) {
   const bmiCheckReply = await handleBmiCheckFlow(userText, from, env);
   if (bmiCheckReply !== null) {
     topic.name = "calculator";
-    await sendWhatsAppReply(from, bmiCheckReply, env);
+    await sendFlowReply(c, bmiCheckReply, "bmi_check", CALCULATOR_DETAILS.bmi_check);
     return true;
   }
 
@@ -127,7 +153,7 @@ export async function handleGuidedFlows(c) {
   const weightChangeReply = await handleWeightChangeFlow(userText, from, env);
   if (weightChangeReply !== null) {
     topic.name = "calculator";
-    await sendWhatsAppReply(from, weightChangeReply, env);
+    await sendFlowReply(c, weightChangeReply, "weight_change_check", CALCULATOR_DETAILS.weight_change_check);
     return true;
   }
 

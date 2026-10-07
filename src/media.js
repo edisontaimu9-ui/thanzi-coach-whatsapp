@@ -6,6 +6,7 @@
 
 import { prepareZXingModule, readBarcodes } from "zxing-wasm/reader";
 import zxingReaderWasmModule from "zxing-wasm/dist/reader/zxing_reader.wasm";
+import { sendResult } from "./feedbackFlow.js";
 import { downloadWhatsAppMedia, sendWhatsAppReply } from "./whatsapp.js";
 import { lookupBarcode, scanPackagedLabel } from "./chakudyaClient.js";
 import { saveLastFoodContext } from "./context.js";
@@ -13,6 +14,7 @@ import { toFoodContext } from "./formatting.js";
 import { fetchWithRetry } from "./http.js";
 
 export async function handleImageMessage(image, from, env, ctx) {
+  const c = { from, env, ctx, userText: "[photo]", lang: "en" }; // routing-context stand-in for sendResult
   const mediaId = image?.id;
   if (!mediaId) {
     await sendWhatsAppReply(
@@ -44,7 +46,7 @@ export async function handleImageMessage(image, from, env, ctx) {
   if (barcode) {
     const found = await lookupBarcode(barcode, env);
     if (found) {
-      await sendWhatsAppReply(from, found.text, env);
+      await sendResult(c, found.text, "Product details come from the packaged-food database matched to this barcode. Check the pack for the latest figures.");
       ctx.waitUntil(saveLastFoodContext(from, toFoodContext(found.item), env));
       return;
     }
@@ -58,13 +60,13 @@ export async function handleImageMessage(image, from, env, ctx) {
     // WhatsApp, not just a one-off manual /packaged/submit call.
     const result = await scanPackagedLabel(base64, mimeType, env, barcode);
     const prefix = `I read barcode ${barcode}, but it's not in the database yet. `;
-    await sendWhatsAppReply(from, prefix + result.text, env);
+    await sendResult(c, prefix + result.text, "Read from the nutrition label in your photo and submitted to the Chakudya review queue. Check the pack for the latest figures.", { buttons: Boolean(result.context) });
     if (result.context) ctx.waitUntil(saveLastFoodContext(from, result.context, env));
     return;
   }
 
   const result = await scanPackagedLabel(base64, mimeType, env);
-  await sendWhatsAppReply(from, result.text, env);
+  await sendResult(c, result.text, "Read from the nutrition label in your photo. Check the pack for the latest figures.", { buttons: Boolean(result.context) });
   if (result.context) ctx.waitUntil(saveLastFoodContext(from, result.context, env));
 }
 
