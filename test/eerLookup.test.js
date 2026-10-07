@@ -183,9 +183,26 @@ describe("formatEer", () => {
     const l = { eer_kcal_per_day: 2354, milk_energy_output_minus_weight_loss_kcal: 430 };
     assert.match(formatEer(lac, [l, l, l], null), /\+430 kcal for milk production/);
   });
+  test("overweight stages: the tool answers with tee_kcal_per_day (real responses from the Chakudya server)", () => {
+    const woman = plan("energy requirements for a 30 year old woman 90kg 160cm");
+    const t = formatEer(woman, [{ tee_kcal_per_day: 2226 }, { tee_kcal_per_day: 2400 }, { tee_kcal_per_day: 2600 }], null);
+    assert.match(t, /Sedentary: \*2,226 kcal\/day\*/);
+    assert.match(t, /BMI 35\.2/);
+    const girl = planEerLookup(detectEnergyRequirementRequest("energy requirements for a 10 year old girl 42kg 138cm"), "overweight");
+    assert.match(formatEer(girl, [{ tee_kcal_per_day: 1700 }, { tee_kcal_per_day: 1863 }, { tee_kcal_per_day: 2000 }], null), /Low active: \*1,863 kcal\/day\*/);
+    // mixed shapes and the name that wins when both are present
+    assert.match(formatEer(woman, [{ eer_kcal_per_day: 2000 }, { tee_kcal_per_day: 2100 }, { eer_kcal_per_day: 2200, tee_kcal_per_day: 9999 }], null), /Active: \*2,200 kcal\/day\*/);
+  });
+  test("no add-on line when the pregnancy add-on is 0 (first trimester)", () => {
+    const preg = plan("energy requirements for a pregnant woman 28 years 65kg 163cm in her first trimester");
+    const r = { eer_kcal_per_day: 2167, pregnancy_energy_deposition_kcal: 0 };
+    assert.doesNotMatch(formatEer(preg, [r, r, r], null), /includes \+0/);
+  });
   test("a malformed tool result throws so the caller falls back", () => {
     const p = plan("calorie needs for a 7 month old baby 7kg");
     assert.throws(() => formatEer(p, [{}], null));
     assert.throws(() => formatEer(p, [], null));
+    assert.throws(() => formatEer(p, [{ tee_kcal_per_day: "n/a" }], null));
+    assert.throws(() => formatEer(p, [{ eer_kcal_per_day: null }], null));
   });
 });

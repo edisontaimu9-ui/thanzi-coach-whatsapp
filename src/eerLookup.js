@@ -233,10 +233,17 @@ function kcal(n) {
   return Math.round(n).toLocaleString("en-US");
 }
 
+// The tool names its answer eer_kcal_per_day for most life stages, but tee_kcal_per_day (total energy
+// expenditure to maintain weight) for the overweight child and overweight/obese adult stages.
+function kcalOf(r) {
+  const v = r?.eer_kcal_per_day ?? r?.tee_kcal_per_day;
+  return v === undefined || v === null ? NaN : Number(v);
+}
+
 /** WhatsApp text. `results` is runEer's output; `resting` is the existing calculator's result or null. */
 export function formatEer(plan, results, resting) {
-  const values = results.map((r) => Number(r?.eer_kcal_per_day));
-  if (!values.length || values.some((v) => !Number.isFinite(v))) throw new Error("EER result missing eer_kcal_per_day");
+  const values = results.map(kcalOf);
+  if (!values.length || values.some((v) => !Number.isFinite(v))) throw new Error("EER result missing eer_kcal_per_day / tee_kcal_per_day");
   const lines = [`📊 *Estimated daily energy needs — ${plan.label}*`];
   if (plan.scope === "infant") {
     const perKg = plan.weightKg > 0 ? Math.round(values[0] / plan.weightKg) : null;
@@ -244,10 +251,10 @@ export function formatEer(plan, results, resting) {
   } else {
     plan.calls.forEach((c, i) => lines.push(`• ${c.label}: *${kcal(values[i])} kcal/day*`));
     const first = results[0];
-    if (plan.scope === "pregnancy" && Number.isFinite(first?.pregnancy_energy_deposition_kcal)) {
+    if (plan.scope === "pregnancy" && Number(first?.pregnancy_energy_deposition_kcal) > 0) {
       lines.push(`  (includes +${first.pregnancy_energy_deposition_kcal} kcal for pregnancy)`);
     }
-    if (plan.scope === "lactation" && Number.isFinite(first?.milk_energy_output_minus_weight_loss_kcal)) {
+    if (plan.scope === "lactation" && Number(first?.milk_energy_output_minus_weight_loss_kcal) > 0) {
       lines.push(`  (includes +${first.milk_energy_output_minus_weight_loss_kcal} kcal for milk production)`);
     }
   }
