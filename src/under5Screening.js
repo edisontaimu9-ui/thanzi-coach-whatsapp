@@ -59,6 +59,7 @@
  */
 
 import { beginSchoolAgeScreening } from "./schoolAgeScreening.js";
+import { isKnowledgeQuestion } from "./screeningShared.js";
 
 
 const SESSION_KIND = "under5_screening";
@@ -123,7 +124,10 @@ async function clearSession(whatsappId, env) {
 const TRIGGER_RE = /\b(screen(?:ing)?|malnutrition|muac)\b.*\b(child|baby|infant|mwana)\b|\b(child|baby|infant|mwana)\b.*\b(screen(?:ing)?|malnutrition)\b/i;
 
 export function detectUnder5ScreeningTrigger(text) {
-  return TRIGGER_RE.test(text.trim());
+  // The pattern is deliberately broad (screening/malnutrition/MUAC + child anywhere), so knowledge
+  // questions like "What interventions are appropriate for a child with moderate acute malnutrition?"
+  // are excluded and go to the Q&A instead of starting the intake.
+  return TRIGGER_RE.test(text.trim()) && !isKnowledgeQuestion(text);
 }
 
 // Exported for unit testing (see test/under5Screening.test.js) — these are

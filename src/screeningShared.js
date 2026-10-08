@@ -189,6 +189,18 @@ export function ageArgs(data) {
 const ACTION_RE = /\b(screen(?:ing)?|assess(?:ment)?|check)\b/i;
 const TOPIC_RE = /\b(malnutrition|malnourished|muac|bmi|nutrition(?:al)? status|underweight)\b/i;
 
+// A question that asks FOR knowledge ("What interventions are appropriate for a child with moderate acute
+// malnutrition?", "What is the MUAC cut-off for SAM?") must reach the Q&A, not start an intake flow. A message
+// that begins with a question word and has no screening action word (screen / assess / check / classify /
+// evaluate / test) is treated as knowledge; "How do I screen a child for malnutrition?" still starts one.
+const QUESTION_START_RE = /^\s*(?:what|how|why|which|when|where|who|whom|whose|can|could|should|would|is|are|was|were|does|do|did|tell me|explain|describe|list|give me|define)\b/i;
+const SCREEN_ACTION_RE = /\b(?:screen(?:ing)?|assess(?:ment)?|check|classify|evaluate|test)\b/i;
+
+export function isKnowledgeQuestion(text) {
+  const t = String(text || "");
+  return QUESTION_START_RE.test(t) && !SCREEN_ACTION_RE.test(t);
+}
+
 export function looksLikeScreeningRequest(text, populationRe) {
   const t = text.trim();
   return ACTION_RE.test(t) && TOPIC_RE.test(t) && populationRe.test(t);

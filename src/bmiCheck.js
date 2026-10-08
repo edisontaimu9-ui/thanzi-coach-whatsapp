@@ -109,6 +109,41 @@ export function formatBmiResult(result, data = {}) {
 // ── Entry point ──
 
 /**
+ * Weight / height written in the request itself ("calculate BMI for 70kg 170cm", "bmi of 62 kg, 1.65 m").
+ * Values outside the plausibility bounds are ignored (the flow will ask for them instead).
+ */
+export function extractInlineMeasurements(text) {
+  const t = String(text || "");
+  const out = {};
+  const kg = /(\d{1,3}(?:[.,]\d+)?)\s*(?:kgs?|kilograms?|kilos?)\b/i.exec(t);
+  if (kg) {
+    const v = Number(kg[1].replace(",", "."));
+    if (v >= BOUNDS.weight_kg.min && v <= BOUNDS.weight_kg.max) out.weight_kg = v;
+  }
+  const cm = /(\d{2,3}(?:[.,]\d+)?)\s*(?:cm|centimet(?:er|re)s?)\b/i.exec(t);
+  const m = /(\d(?:[.,]\d{1,2})?)\s*(?:m|metres?|meters?)\b(?![a-z])/i.exec(t);
+  if (cm) {
+    const v = Number(cm[1].replace(",", "."));
+    if (v >= BOUNDS.height_cm.min && v <= BOUNDS.height_cm.max) out.height_cm = v;
+  } else if (m) {
+    const v = Math.round(Number(m[1].replace(",", ".")) * 100);
+    if (v >= BOUNDS.height_cm.min && v <= BOUNDS.height_cm.max) out.height_cm = v;
+  }
+  return out;
+}
+
+async function runBmiCheck(data, env) {
+  let toolResult;
+  try {
+    toolResult = await callMcpTool("bmi_classification", { weight_kg: data.weight_kg, height_cm: data.height_cm }, env);
+  } catch (err) {
+    console.error("bmi_classification call failed:", err);
+    return `Sorry, the BMI check couldn't be completed: ${err instanceof Error ? err.message : String(err)}. Please try again in a moment.`;
+  }
+  return formatBmiResult(toolResult, data);
+}
+
+/**
  * Handles one incoming text message as part of (or the start of) a BMI-check flow.
  * Returns a reply string if handled, or `null` if not (caller should fall through).
  */
@@ -117,6 +152,18 @@ export async function handleBmiCheckFlow(userText, from, env) {
 
   if (!session) {
     if (!detectBmiCheckTrigger(userText)) return null;
+    // Anything already in the request is used: with both numbers the result comes straight back; with
+    // one, only the missing one is asked for.
+    const inline = extractInlineMeasurements(userText);
+    if (inline.weight_kg !== undefined && inline.height_cm !== undefined) return runBmiCheck(inline, env);
+    if (inline.weight_kg !== undefined) {
+      await saveSession(SESSION_KIND, from, inline, "height", env);
+      return `Got the weight: ${inline.weight_kg} kg.\n\n${promptFor("height")}`;
+    }
+    if (inline.height_cm !== undefined) {
+      await saveSession(SESSION_KIND, from, inline, "weight", env);
+      return `Got the height: ${inline.height_cm} cm.\n\nWhat is the weight in kilograms? (e.g. *62*). Reply *cancel* anytime to stop.`;
+    }
     await saveSession(SESSION_KIND, from, {}, "weight", env);
     return promptFor("weight");
   }
@@ -134,7 +181,8 @@ export async function handleBmiCheckFlow(userText, from, env) {
   if (step === "weight") data.weight_kg = stepResult.value;
   if (step === "height") data.height_cm = stepResult.value;
 
-  const next = nextStep(step);
+  // Next question = whichever of weight / height is still missing (one may already have come with the request).
+  const next = data.weight_kg === undefined ? "weight" : data.height_cm === undefined ? "height" : "finish";
   if (next !== "finish") {
     await saveSession(SESSION_KIND, from, data, next, env);
     return promptFor(next);
@@ -145,14 +193,5 @@ export async function handleBmiCheckFlow(userText, from, env) {
   if (data.weight_kg === undefined || data.height_cm === undefined) {
     return 'I don\'t have enough information to check BMI. Say "check my BMI" to start again.';
   }
-
-  let toolResult;
-  try {
-    toolResult = await callMcpTool("bmi_classification", { weight_kg: data.weight_kg, height_cm: data.height_cm }, env);
-  } catch (err) {
-    console.error("bmi_classification call failed:", err);
-    return `Sorry, the BMI check couldn't be completed: ${err instanceof Error ? err.message : String(err)}. Please try again in a moment.`;
-  }
-
-  return formatBmiResult(toolResult, data);
+  return runBmiCheck(data, env);
 }

@@ -7,6 +7,7 @@ import {
   applyReply,
   formatBmiResult,
   handleBmiCheckFlow,
+  extractInlineMeasurements,
 } from "../src/bmiCheck.js";
 import { detectUnder5ScreeningTrigger } from "../src/under5Screening.js";
 import { detectPregnantPostpartumScreeningTrigger } from "../src/pregnantPostpartumScreening.js";
@@ -200,5 +201,52 @@ describe("handleBmiCheckFlow — end to end with a fake env", () => {
     const reply = await say("165");
     assert.match(reply, /couldn't be completed/);
     assert.equal(env._rows.size, 0);
+  });
+});
+
+describe("BMI request that already contains the numbers (the reported bug)", () => {
+  test("extractInlineMeasurements reads kg / cm / m and ignores implausible values", () => {
+    assert.deepEqual(extractInlineMeasurements("calculate BMI for 70kg 170cm."), { weight_kg: 70, height_cm: 170 });
+    assert.deepEqual(extractInlineMeasurements("bmi of 62 kg, 1.65 m"), { weight_kg: 62, height_cm: 165 });
+    assert.deepEqual(extractInlineMeasurements("check my bmi 82,5 kilograms 180 centimetres"), { weight_kg: 82.5, height_cm: 180 });
+    assert.deepEqual(extractInlineMeasurements("calculate BMI for 700kg 170cm"), { height_cm: 170 });
+    assert.deepEqual(extractInlineMeasurements("check my BMI"), {});
+    assert.deepEqual(extractInlineMeasurements("bmi for 70kg in 5 minutes"), { weight_kg: 70 });
+  });
+
+  test("both numbers in the request: the result comes straight back, no questions, no session left", async () => {
+    const calls = [];
+    const env = makeFakeEnv({ bmi_classification: bmiResult({ bmi: 24.2 }) }, calls);
+    const reply = await handleBmiCheckFlow("calculate BMI for 70kg 170cm.", "265111", env);
+    assert.match(reply, /\*BMI 24\.2\*/);
+    assert.match(reply, /Weight 70 kg, height 170 cm/);
+    assert.deepEqual(calls, [{ name: "bmi_classification", args: { weight_kg: 70, height_cm: 170 } }]);
+    assert.equal(env._rows.size, 0);
+    // and the next message is not swallowed by a leftover session
+    assert.equal(await handleBmiCheckFlow("Yes", "265111", env), null);
+  });
+
+  test("only the weight given: asks just for the height, then finishes", async () => {
+    const calls = [];
+    const env = makeFakeEnv({ bmi_classification: bmiResult() }, calls);
+    const first = await handleBmiCheckFlow("what is my bmi, I weigh 65 kg", "265222", env);
+    assert.match(first, /Got the weight: 65 kg/);
+    assert.match(first, /height in centimetres/);
+    const done = await handleBmiCheckFlow("168", "265222", env);
+    assert.match(done, /Weight 65 kg, height 168 cm/);
+    assert.deepEqual(calls[0].args, { weight_kg: 65, height_cm: 168 });
+  });
+
+  test("only the height given: asks just for the weight", async () => {
+    const env = makeFakeEnv({ bmi_classification: bmiResult() });
+    const first = await handleBmiCheckFlow("check my bmi, I am 1.72 m tall", "265333", env);
+    assert.match(first, /Got the height: 172 cm/);
+    assert.match(first, /weight in kilograms/);
+    assert.match(await handleBmiCheckFlow("80", "265333", env), /Weight 80 kg, height 172 cm/);
+  });
+
+  test("a bare 'check my bmi' still asks for the weight first", async () => {
+    const env = makeFakeEnv({ bmi_classification: bmiResult() });
+    assert.match(await handleBmiCheckFlow("check my bmi", "265444", env), /What is the weight in kilograms/);
   });
 });
