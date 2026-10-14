@@ -62,8 +62,27 @@ export async function fetchWithRetry(fetcher, input, init = {}, timeoutMs = FETC
 // site below uses this instead of env.CHAKUDYA_API.fetch directly so none
 // of them can hang past FETCH_TIMEOUT_MS, and a transient 5xx gets one
 // retry instead of surfacing straight to the user.
+//
+// chakudya-api requires a valid API key on every route except GET /, GET /health and the
+// FHIR conformance reads, so every call carries `Authorization: Bearer <CHAKUDYA_API_KEY>`
+// (a consumer key from the Chakudya developer console, stored as a Worker secret).
+let warnedNoKey = false;
+
+export function withChakudyaKey(env, init = {}) {
+  const key = env.CHAKUDYA_API_KEY;
+  if (!key) {
+    if (!warnedNoKey) {
+      warnedNoKey = true;
+      console.warn("CHAKUDYA_API_KEY is not set: chakudya-api will answer 401 to every call.");
+    }
+    return init;
+  }
+  const existing = init.headers instanceof Headers ? Object.fromEntries(init.headers) : init.headers || {};
+  return { ...init, headers: { ...existing, Authorization: `Bearer ${key}` } };
+}
+
 export function chakudyaFetch(env, path, init) {
-  return fetchWithRetry(env.CHAKUDYA_API.fetch.bind(env.CHAKUDYA_API), path, init);
+  return fetchWithRetry(env.CHAKUDYA_API.fetch.bind(env.CHAKUDYA_API), path, withChakudyaKey(env, init));
 }
 
 // ── One more try for "provider busy" answers ──

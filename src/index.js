@@ -141,6 +141,11 @@
  *   ADMIN_PHONE             - optional; your own WhatsApp number for the daily
  *                            summary cron job (see wrangler.toml [triggers]).
  *                            No-ops if unset.
+ *   CHAKUDYA_API_KEY        - REQUIRED. A consumer API key for chakudya-api (create one on the
+ *                            Chakudya developer console). chakudya-api refuses every data
+ *                            route without a key, so without this secret every food lookup,
+ *                            screening call and /rag/ask answer fails with a 401. Sent as
+ *                            `Authorization: Bearer` by chakudyaFetch in ./http.js.
  *   CHAKUDYA_MCP_AUTH_TOKEN - REQUIRED for the under-5 screening flow to work.
  *                            Must match chakudya-mcp-server-cloudflare's own
  *                            MCP_AUTH_TOKEN secret exactly (same value, both
@@ -162,7 +167,7 @@
  * instead of fetch() to a *.workers.dev URL, which triggers Cloudflare
  * error 1042 ("request attempting to route to itself").
  *
- * /rag/ask is public + rate-limited (no auth needed). Contract, per openapi.json:
+ * /rag/ask needs the API key above and is rate-limited per key. Contract, per openapi.json:
  *   POST /rag/ask  { query, context: "clinical"|"general"|"both", top_k, session_id }
  *   -> 200 { status: "success", data: { answer, intent, barcode_detected, sources[] } }
  *   -> 429 rate limited, with Retry-After header

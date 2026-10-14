@@ -6,7 +6,8 @@ nutrition RAG API's `/rag/ask` endpoint.
 ## Before pushing — fill in one thing
 
 `CHAKUDYA_API_URL` is already configured, and the `/rag/ask` request/response
-shapes match `openapi.json` exactly (public, no API key needed). You only need
+shapes match `openapi.json` exactly (every call needs a chakudya-api consumer key, set as the
+`CHAKUDYA_API_KEY` Worker secret). You only need
 to set, in `wrangler.toml`:
 
 - `PHONE_NUMBER_ID` — from Meta App Dashboard > WhatsApp > API Setup

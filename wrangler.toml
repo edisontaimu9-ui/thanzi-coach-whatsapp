@@ -44,6 +44,9 @@ database_id = "b9170a96-d6ed-4b26-b137-06cb073ea01a"
 # binding is a direct internal call that bypasses that restriction entirely
 # and is faster too. "service" must exactly match the deployed Worker's name
 # (chakudya-api's `name = "..."` line in its own wrangler.toml).
+# chakudya-api requires an API key on every data route, so also set the Worker secret
+# CHAKUDYA_API_KEY (a consumer key from the Chakudya developer console) in the Cloudflare
+# dashboard: Settings > Variables and Secrets. A service binding does not bypass that check.
 [[services]]
 binding = "CHAKUDYA_API"
 service = "chakudya-api"
