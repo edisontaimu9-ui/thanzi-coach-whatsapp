@@ -23,11 +23,15 @@ import { sendWhatsAppVoiceNote } from "./whatsapp.js";
 export const TTS_URL = "https://api.groq.com/openai/v1/audio/speech";
 export const TTS_MODEL = "canopylabs/orpheus-v1-english";
 export const DEFAULT_VOICE = "autumn";
-// Orpheus accepts only short inputs per request, so only a short opening of the answer is spoken.
-// Raise/lower with VOICE_MAX_CHARS if Groq's limit changes.
-export const DEFAULT_MAX_CHARS = 190;
+// Groq's Orpheus accepts at most 200 characters per request, so a longer spoken text is split into
+// sentence-sized pieces (TTS_CHUNK_CHARS each), spoken one request at a time, and joined into one
+// voice note. VOICE_MAX_CHARS is the total spoken length; MAX_SPOKEN_CHUNKS caps requests per reply
+// (each one is a Worker subrequest and uses Groq quota).
+export const DEFAULT_MAX_CHARS = 600;
+export const TTS_CHUNK_CHARS = 190;
+export const MAX_SPOKEN_CHUNKS = 5;
 const MIN_MAX_CHARS = 60;
-const MAX_MAX_CHARS = 400;
+const MAX_MAX_CHARS = 1200;
 
 export function voiceRepliesEnabled(env = {}) {
   return (
@@ -85,6 +89,92 @@ export function prepareSpokenText(text, maxChars = DEFAULT_MAX_CHARS) {
   const lastSpace = window.lastIndexOf(" ");
   const base = (lastSpace > 20 ? window.slice(0, lastSpace) : window).replace(/[\s,;:]+$/, "");
   return `${base}.`;
+}
+
+function splitWords(sentence, limit) {
+  const pieces = [];
+  let cur = "";
+  for (const word of sentence.split(/\s+/)) {
+    if (word.length > limit) {
+      if (cur) { pieces.push(cur); cur = ""; }
+      for (let i = 0; i < word.length; i += limit) pieces.push(word.slice(i, i + limit));
+      continue;
+    }
+    if (cur && cur.length + 1 + word.length > limit) { pieces.push(cur); cur = ""; }
+    cur = cur ? `${cur} ${word}` : word;
+  }
+  if (cur) pieces.push(cur);
+  return pieces;
+}
+
+/** Splits spoken text into pieces of at most `limit` characters, breaking at sentence ends where it can. */
+export function splitForSpeech(text, limit = TTS_CHUNK_CHARS) {
+  const t = String(text || "").trim();
+  if (!t) return [];
+  const sentences = t.split(/(?<=[.!?])\s+/).filter(Boolean); // "2.5" has no space after the dot: not split
+  const out = [];
+  let cur = "";
+  const flush = () => { if (cur) { out.push(cur); cur = ""; } };
+  for (const sentence of sentences) {
+    if (sentence.length > limit) {
+      flush();
+      out.push(...splitWords(sentence, limit));
+      continue;
+    }
+    if (cur && cur.length + 1 + sentence.length > limit) flush();
+    cur = cur ? `${cur} ${sentence}` : sentence;
+  }
+  flush();
+  return out;
+}
+
+const ascii = (b, at, n) => String.fromCharCode(...b.subarray(at, at + n));
+
+// Reads a WAV's format block and sample bytes. Returns null if it isn't a plain RIFF/WAVE file.
+function parseWav(bytes) {
+  if (!bytes || bytes.length < 12 || ascii(bytes, 0, 4) !== "RIFF" || ascii(bytes, 8, 4) !== "WAVE") return null;
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let pos = 12;
+  let fmt = null;
+  while (pos + 8 <= bytes.length) {
+    const id = ascii(bytes, pos, 4);
+    const size = dv.getUint32(pos + 4, true);
+    const start = pos + 8;
+    if (id === "fmt " && start + 16 <= bytes.length) fmt = bytes.slice(start, start + 16);
+    if (id === "data") {
+      // Streaming encoders may write 0 or 0xFFFFFFFF as the size: then the data runs to the end.
+      const end = size === 0 || size === 0xffffffff || start + size > bytes.length ? bytes.length : start + size;
+      return fmt ? { fmt, data: bytes.subarray(start, end) } : null;
+    }
+    pos = start + size + (size & 1);
+  }
+  return null;
+}
+
+/**
+ * Joins several WAVs (same format, as Groq returns for one voice) into one. A single WAV is returned
+ * untouched. Returns null if any is unreadable or the formats differ.
+ */
+export function mergeWavs(wavs) {
+  if (!wavs?.length) return null;
+  if (wavs.length === 1) return wavs[0];
+  const parsed = wavs.map(parseWav);
+  if (parsed.some((p) => !p)) return null;
+  const fmt = parsed[0].fmt;
+  if (parsed.some((p) => p.fmt.length !== fmt.length || p.fmt.some((v, i) => v !== fmt[i]))) return null;
+  const total = parsed.reduce((n, p) => n + p.data.length, 0);
+  const out = new Uint8Array(44 + total);
+  const dv = new DataView(out.buffer);
+  out.set([0x52, 0x49, 0x46, 0x46], 0); // RIFF
+  dv.setUint32(4, 36 + total, true);
+  out.set([0x57, 0x41, 0x56, 0x45, 0x66, 0x6d, 0x74, 0x20], 8); // WAVEfmt 
+  dv.setUint32(16, 16, true);
+  out.set(fmt, 20);
+  out.set([0x64, 0x61, 0x74, 0x61], 36); // data
+  dv.setUint32(40, total, true);
+  let at = 44;
+  for (const p of parsed) { out.set(p.data, at); at += p.data.length; }
+  return out;
 }
 
 const CMD = /^(?:turn\s+)?voice(?:\s+(?:replies|reply|notes|note|mode))?\s+(on|off|auto)$/;
@@ -200,9 +290,18 @@ export async function speakReply(text, from, env, deps = {}) {
   try {
     if (!voiceRepliesEnabled(env)) return false;
     const spoken = prepareSpokenText(text, maxSpokenChars(env));
-    if (!spoken) return false;
-    const wav = await synthesize(spoken, env);
-    if (!wav) return false;
+    const chunks = splitForSpeech(spoken).slice(0, MAX_SPOKEN_CHUNKS);
+    if (!chunks.length) return false;
+    // One TTS request per piece, in order. If a later piece fails, speak what we have so far: the
+    // pieces end on sentence boundaries, so a shorter note still makes sense.
+    const wavs = [];
+    for (const chunk of chunks) {
+      const piece = await synthesize(chunk, env);
+      if (!piece) break;
+      wavs.push(piece);
+    }
+    if (!wavs.length) return false;
+    const wav = wavs.length === 1 ? wavs[0] : (deps.merge || mergeWavs)(wavs) || wavs[0];
     const ogg = await convert(wav, env);
     if (!ogg) return false;
     await send(from, ogg, env);

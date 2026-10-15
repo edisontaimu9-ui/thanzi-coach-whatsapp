@@ -166,15 +166,16 @@ The bot can follow its text answer with a short spoken voice note (English only,
 Orpheus TTS has no Chichewa voice). It is **off until you opt in**, so deploying changes nothing.
 
 How it works: answer text -> Groq Orpheus TTS (WAV) -> `voice-converter/` (ffmpeg, OGG/Opus) ->
-WhatsApp media upload -> voice note. Only the opening of the answer is spoken (about 190
-characters, `VOICE_MAX_CHARS`), and references are never read out. If any step fails, the text
+WhatsApp media upload -> voice note. Only the opening of the answer is spoken (about 600
+characters, `VOICE_MAX_CHARS`). Groq accepts 200 characters per request, so longer text is spoken in up to 5
+sentence-sized pieces and joined into one voice note. References are never read out. If any step fails, the text
 reply is unaffected and no voice note is sent. See `src/voice.js`.
 
 Turn it on:
 1. Deploy `voice-converter/` (see its README) and note its URL and token.
 2. In Cloudflare > Workers & Pages > thanzi-coach-whatsapp > Settings > Variables and Secrets, add
    `VOICE_CONVERTER_URL`, `VOICE_CONVERTER_TOKEN` (secret) and `VOICE_REPLIES` = `on`.
-   Optional: `VOICE_NAME` (default `autumn`), `VOICE_MAX_CHARS` (60-400).
+   Optional: `VOICE_NAME` (default `autumn`), `VOICE_MAX_CHARS` (60-1200).
 3. Push; migration `0011_add_user_voice.sql` applies automatically.
 
 If a voice note doesn't arrive, send `voice test` from the admin number (`ADMIN_PHONE`): the bot runs each step (settings, Groq TTS, converter, WhatsApp upload) and replies with what failed.

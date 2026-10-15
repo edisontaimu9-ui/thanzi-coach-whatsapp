@@ -9,6 +9,9 @@ import {
   saveVoicePref,
   shouldSpeak,
   speakReply,
+  splitForSpeech,
+  mergeWavs,
+  TTS_CHUNK_CHARS,
   diagnoseVoice,
   voiceModeConfirmation,
   voiceRepliesEnabled,
@@ -214,5 +217,117 @@ describe("diagnoseVoice", () => {
   test("never prints secret values", async () => {
     const out = (await diagnoseVoice({ ...ENV, GROQ_API_KEY: "SECRETKEY", VOICE_CONVERTER_TOKEN: "SECRETTOKEN" }, "265", { fetch: okFetch(), send: async () => {} })).join("\n");
     assert.doesNotMatch(out, /SECRETKEY|SECRETTOKEN/);
+  });
+});
+
+function makeWav(samples, { rate = 48000, sizeField } = {}) {
+  const data = new Uint8Array(samples);
+  const out = new Uint8Array(44 + data.length);
+  const dv = new DataView(out.buffer);
+  out.set([0x52, 0x49, 0x46, 0x46], 0);
+  dv.setUint32(4, 36 + data.length, true);
+  out.set([0x57, 0x41, 0x56, 0x45, 0x66, 0x6d, 0x74, 0x20], 8);
+  dv.setUint32(16, 16, true);
+  dv.setUint16(20, 1, true); // PCM
+  dv.setUint16(22, 1, true); // mono
+  dv.setUint32(24, rate, true);
+  dv.setUint32(28, rate * 2, true);
+  dv.setUint16(32, 2, true);
+  dv.setUint16(34, 16, true);
+  out.set([0x64, 0x61, 0x74, 0x61], 36);
+  dv.setUint32(40, sizeField ?? data.length, true);
+  out.set(data, 44);
+  return out;
+}
+
+describe("splitForSpeech", () => {
+  test("short text stays whole; empty gives nothing", () => {
+    assert.deepEqual(splitForSpeech("Hello there."), ["Hello there."]);
+    assert.deepEqual(splitForSpeech(""), []);
+  });
+  test("packs whole sentences into pieces within the limit", () => {
+    const text = "One two three. Four five six. Seven eight nine. Ten eleven twelve.";
+    const parts = splitForSpeech(text, 40);
+    assert.deepEqual(parts, ["One two three. Four five six.", "Seven eight nine. Ten eleven twelve."]);
+    assert.ok(parts.every((p) => p.length <= 40));
+  });
+  test("does not split decimals", () => {
+    assert.deepEqual(splitForSpeech("Rice has 2.5 g of fibre.", 60), ["Rice has 2.5 g of fibre."]);
+  });
+  test("an over-long sentence is split at word boundaries", () => {
+    const parts = splitForSpeech("word ".repeat(100).trim() + ".", 50);
+    assert.ok(parts.length > 1);
+    assert.ok(parts.every((p) => p.length <= 50));
+    assert.equal(parts.join(" ").replace(/\s+/g, " "), "word ".repeat(100).trim() + ".");
+  });
+  test("every piece fits Groq's 200 character limit by default", () => {
+    assert.ok(TTS_CHUNK_CHARS <= 200);
+    const parts = splitForSpeech("Beans are rich in iron and protein. ".repeat(40));
+    assert.ok(parts.every((p) => p.length <= TTS_CHUNK_CHARS));
+  });
+});
+
+describe("mergeWavs", () => {
+  test("a single wav is returned untouched", () => {
+    const w = makeWav([1, 2, 3, 4]);
+    assert.equal(mergeWavs([w]), w);
+  });
+  test("joins sample data under one valid header", () => {
+    const merged = mergeWavs([makeWav([1, 2, 3, 4]), makeWav([5, 6]), makeWav([7, 8, 9, 10])]);
+    const dv = new DataView(merged.buffer, merged.byteOffset, merged.byteLength);
+    assert.equal(String.fromCharCode(...merged.subarray(0, 4)), "RIFF");
+    assert.equal(dv.getUint32(40, true), 10);
+    assert.equal(dv.getUint32(4, true), 36 + 10);
+    assert.equal(dv.getUint32(24, true), 48000);
+    assert.deepEqual([...merged.subarray(44)], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+  });
+  test("treats a streaming size field (0 or 0xFFFFFFFF) as data to the end", () => {
+    const merged = mergeWavs([makeWav([1, 2], { sizeField: 0xffffffff }), makeWav([3, 4], { sizeField: 0 })]);
+    assert.deepEqual([...merged.subarray(44)], [1, 2, 3, 4]);
+  });
+  test("returns null for mismatched formats or non-wav input", () => {
+    assert.equal(mergeWavs([makeWav([1, 2]), makeWav([3, 4], { rate: 24000 })]), null);
+    assert.equal(mergeWavs([makeWav([1, 2]), new Uint8Array([1, 2, 3])]), null);
+    assert.equal(mergeWavs([]), null);
+  });
+});
+
+describe("speakReply with long text", () => {
+  const LONG = Array.from({ length: 12 }, (_, i) => `Sentence number ${i + 1} says that beans are rich in iron and fibre.`).join(" ");
+  test("speaks several pieces, each within the limit, and joins them", async () => {
+    const pieces = [];
+    let merged = null;
+    let sent = null;
+    const ok = await speakReply(LONG, "265", ENV, {
+      synthesize: async (t) => { pieces.push(t); return makeWav([pieces.length, pieces.length]); },
+      convert: async (w) => { merged = w; return new Uint8Array([9]); },
+      send: async (to, b) => { sent = b; },
+    });
+    assert.equal(ok, true);
+    assert.ok(pieces.length > 1 && pieces.length <= 5);
+    assert.ok(pieces.every((p) => p.length <= 190));
+    assert.equal(merged.length, 44 + pieces.length * 2);
+    assert.deepEqual([...sent], [9]);
+  });
+  test("a later piece failing still sends the earlier ones", async () => {
+    let n = 0;
+    let merged = null;
+    const ok = await speakReply(LONG, "265", ENV, {
+      synthesize: async () => (++n <= 2 ? makeWav([n, n]) : null),
+      convert: async (w) => { merged = w; return new Uint8Array([9]); },
+      send: async () => {},
+    });
+    assert.equal(ok, true);
+    assert.equal(n, 3);
+    assert.equal(merged.length, 44 + 4);
+  });
+  test("never more than 5 TTS requests", async () => {
+    let n = 0;
+    await speakReply("A fairly long sentence about nutrition. ".repeat(100), "265", { ...ENV, VOICE_MAX_CHARS: "1200" }, {
+      synthesize: async () => { n++; return makeWav([1, 1]); },
+      convert: async () => new Uint8Array([9]),
+      send: async () => {},
+    });
+    assert.equal(n, 5);
   });
 });
