@@ -177,6 +177,8 @@ Turn it on:
    Optional: `VOICE_NAME` (default `autumn`), `VOICE_MAX_CHARS` (60-400).
 3. Push; migration `0011_add_user_voice.sql` applies automatically.
 
+If a voice note doesn't arrive, send `voice test` from the admin number (`ADMIN_PHONE`): the bot runs each step (settings, Groq TTS, converter, WhatsApp upload) and replies with what failed.
+
 People choose their own mode by sending a message: `voice auto` (default: a voice note in gets a
 voice note back), `voice on` (every English answer), or `voice off`.
 

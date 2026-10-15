@@ -9,6 +9,7 @@ import {
   saveVoicePref,
   shouldSpeak,
   speakReply,
+  diagnoseVoice,
   voiceModeConfirmation,
   voiceRepliesEnabled,
 } from "../src/voice.js";
@@ -160,5 +161,58 @@ describe("speakReply", () => {
     const ok = await speakReply("🙂", "265", ENV, { synthesize: async () => { called = true; return wav; } });
     assert.equal(ok, false);
     assert.equal(called, false);
+  });
+});
+
+describe("diagnoseVoice", () => {
+  const okFetch = (status = 200) => async (url) => new Response(new Uint8Array([1, 2, 3]), { status });
+  const route = (tts, conv) => async (url) => (String(url).includes("groq.com") ? tts() : conv());
+
+  test("stops early and names missing settings", async () => {
+    const out = (await diagnoseVoice({ VOICE_REPLIES: "off" }, "265")).join("\n");
+    assert.match(out, /VOICE_REPLIES: "off" ❌/);
+    assert.match(out, /VOICE_CONVERTER_URL: MISSING/);
+    assert.match(out, /Stopped/);
+  });
+  test("all steps pass", async () => {
+    let sent = false;
+    const out = (await diagnoseVoice({ ...ENV, VOICE_CONVERTER_TOKEN: "t" }, "265", {
+      fetch: okFetch(),
+      send: async () => { sent = true; },
+    })).join("\n");
+    assert.equal(sent, true);
+    assert.match(out, /✅ Groq TTS/);
+    assert.match(out, /✅ Converter/);
+    assert.match(out, /✅ WhatsApp/);
+    assert.match(out, /All steps passed/);
+    assert.doesNotMatch(out, /❌/);
+  });
+  test("reports a Groq failure and does not try later steps", async () => {
+    let sent = false;
+    const out = (await diagnoseVoice({ ...ENV, VOICE_CONVERTER_TOKEN: "t" }, "265", {
+      fetch: async () => new Response('{"error":"model_terms_required"}', { status: 400 }),
+      send: async () => { sent = true; },
+    })).join("\n");
+    assert.match(out, /❌ Groq TTS: HTTP 400 .*model_terms_required/);
+    assert.doesNotMatch(out, /Converter:/);
+    assert.equal(sent, false);
+  });
+  test("converter 401 hints at the token", async () => {
+    const out = (await diagnoseVoice({ ...ENV, VOICE_CONVERTER_TOKEN: "t" }, "265", {
+      fetch: route(() => new Response(new Uint8Array([1])), () => new Response("Unauthorized", { status: 401 })),
+      send: async () => {},
+    })).join("\n");
+    assert.match(out, /❌ Converter: HTTP 401 \(token doesn't match/);
+  });
+  test("a WhatsApp upload error is reported", async () => {
+    const out = (await diagnoseVoice({ ...ENV, VOICE_CONVERTER_TOKEN: "t" }, "265", {
+      fetch: okFetch(),
+      send: async () => { throw new Error("WhatsApp media upload error: 400 bad"); },
+    })).join("\n");
+    assert.match(out, /❌ WhatsApp: WhatsApp media upload error: 400 bad/);
+  });
+  test("never prints secret values", async () => {
+    const out = (await diagnoseVoice({ ...ENV, GROQ_API_KEY: "SECRETKEY", VOICE_CONVERTER_TOKEN: "SECRETTOKEN" }, "265", { fetch: okFetch(), send: async () => {} })).join("\n");
+    assert.doesNotMatch(out, /SECRETKEY|SECRETTOKEN/);
   });
 });

@@ -212,3 +212,83 @@ export async function speakReply(text, from, env, deps = {}) {
     return false;
   }
 }
+
+/**
+ * Admin-only "voice test": runs every step for real and returns report lines saying which one fails.
+ * Never includes secret values. `deps` lets tests swap fetch and the WhatsApp send.
+ */
+export async function diagnoseVoice(env, from, deps = {}) {
+  const doFetch = deps.fetch || fetch;
+  const send = deps.send || sendWhatsAppVoiceNote;
+  const lines = ["🔧 *Voice check*"];
+  const flag = (v) => (v ? "set" : "MISSING");
+  const mode = String(env.VOICE_REPLIES || "").toLowerCase();
+  lines.push(`VOICE_REPLIES: ${mode === "on" ? "on ✅" : `${env.VOICE_REPLIES ? `"${env.VOICE_REPLIES}"` : "MISSING"} ❌ (must be on)`}`);
+  lines.push(`GROQ_API_KEY: ${flag(env.GROQ_API_KEY)}`);
+  lines.push(`VOICE_CONVERTER_URL: ${env.VOICE_CONVERTER_URL ? env.VOICE_CONVERTER_URL : "MISSING ❌"}`);
+  lines.push(`VOICE_CONVERTER_TOKEN: ${flag(env.VOICE_CONVERTER_TOKEN)}${env.VOICE_CONVERTER_TOKEN ? "" : " ❌ (converter needs it)"}`);
+  if (!env.GROQ_API_KEY || !env.VOICE_CONVERTER_URL) {
+    lines.push("Stopped: fix the settings above in Cloudflare, then send *voice test* again.");
+    return lines;
+  }
+
+  const snippet = async (res) => (await res.text().catch(() => "")).replace(/\s+/g, " ").slice(0, 200);
+  let ok = true;
+
+  let wav = null;
+  try {
+    const res = await fetchWithTimeout(
+      doFetch,
+      TTS_URL,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${env.GROQ_API_KEY}` },
+        body: JSON.stringify({ model: TTS_MODEL, voice: env.VOICE_NAME || DEFAULT_VOICE, input: "Hello from Thanzi Coach.", response_format: "wav" }),
+      },
+      20000
+    );
+    if (res.ok) {
+      wav = new Uint8Array(await res.arrayBuffer());
+      lines.push(`✅ Groq TTS: ${wav.length} bytes`);
+    } else {
+      ok = false;
+      lines.push(`❌ Groq TTS: HTTP ${res.status} ${await snippet(res)}`);
+    }
+  } catch (err) {
+    ok = false;
+    lines.push(`❌ Groq TTS: ${err?.message || err}`);
+  }
+
+  let ogg = null;
+  if (wav) {
+    try {
+      const headers = { "Content-Type": "audio/wav" };
+      if (env.VOICE_CONVERTER_TOKEN) headers.Authorization = `Bearer ${env.VOICE_CONVERTER_TOKEN}`;
+      const res = await fetchWithTimeout(doFetch, env.VOICE_CONVERTER_URL, { method: "POST", headers, body: wav }, 45000);
+      if (res.ok) {
+        ogg = new Uint8Array(await res.arrayBuffer());
+        lines.push(`✅ Converter: ${ogg.length} bytes`);
+      } else {
+        ok = false;
+        const hint = res.status === 401 ? " (token doesn't match Render's CONVERTER_TOKEN)" : "";
+        lines.push(`❌ Converter: HTTP ${res.status}${hint} ${await snippet(res)}`);
+      }
+    } catch (err) {
+      ok = false;
+      lines.push(`❌ Converter: ${err?.message || err} (wrong URL, or Render was asleep: try again in a minute)`);
+    }
+  }
+
+  if (ogg) {
+    try {
+      await send(from, ogg, env);
+      lines.push("✅ WhatsApp: voice note sent, you should have received it");
+    } catch (err) {
+      ok = false;
+      lines.push(`❌ WhatsApp: ${String(err?.message || err).slice(0, 300)}`);
+    }
+  }
+
+  lines.push(ok ? "All steps passed." : "Fix the first ❌ above, then send *voice test* again.");
+  return lines;
+}

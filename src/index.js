@@ -190,7 +190,7 @@ import { clearAllScreeningSessions } from "./screeningShared.js";
 import { handleStats, handleStatsFeedback, handleStatsTimeseries, isDuplicateMessage, recordActivity, recordError, sendDailySummary } from "./analytics.js";
 import { downloadWhatsAppMedia, sendPromptList, sendTypingIndicator, sendWhatsAppReply } from "./whatsapp.js";
 import { handleImageMessage, transcribeAudio } from "./media.js";
-import { getVoicePref, parseVoiceCommand, saveVoicePref, shouldSpeak, voiceModeConfirmation, voiceRepliesEnabled } from "./voice.js";
+import { diagnoseVoice, getVoicePref, parseVoiceCommand, saveVoicePref, shouldSpeak, voiceModeConfirmation, voiceRepliesEnabled } from "./voice.js";
 import { handleFeedbackTap } from "./feedbackFlow.js";
 import { handleGuidedFlows, handleMenusAndGreeting } from "./textFlows.js";
 import { handleComparisonsAndMultiFood, handleMealPlans, handleReferenceQueries } from "./nutritionHandlers.js";
@@ -410,6 +410,14 @@ async function handleTextMessageInner(userText, from, env, ctx, opts = {}, topic
       await sendWhatsAppReply(from, await runAdminCommand(adminCmd, env.DB), env);
       return;
     }
+  }
+
+  // "voice test": admin-only step-by-step check of voice replies (./voice.js diagnoseVoice).
+  if (env.ADMIN_PHONE && from === env.ADMIN_PHONE && /^voice test$/i.test(userText.trim().replace(/[!?.]+$/, ""))) {
+    topic.name = "admin";
+    await sendWhatsAppReply(from, "Running the voice check... this can take up to a minute.", env).catch(() => {});
+    await sendWhatsAppReply(from, (await diagnoseVoice(env, from)).join("\n"), env);
+    return;
   }
 
   // Flexible openers: "hello Thanzi, how much iron do I need" -> answer the question with the
