@@ -8,6 +8,7 @@ import { buildDetailsMessage, buildFeedbackPrompt, buildFeedbackThanks, buildSha
 import { LLM_BUSY_MESSAGE, SUBREQUEST_LIMIT_MESSAGE } from "./errors.js";
 import { sendWhatsAppInteractiveButtons, sendWhatsAppInteractiveCtaUrl, sendWhatsAppReply } from "./whatsapp.js";
 import { isChichewaFor } from "./language.js";
+import { speakReply } from "./voice.js";
 
 // Follow-up buttons after an answer or result. Best-effort, but hidden references must never be lost:
 // if the buttons can't be created or sent, real references are sent as plain text instead.
@@ -43,6 +44,8 @@ export async function sendResult(c, text, details = DEFAULT_RESULT_DETAILS, opts
   const hide = Boolean(references) && shouldAskFeedback(main);
   const shown = hide ? main : text;
   await sendWhatsAppReply(from, shown, env);
+  // Optional spoken copy (./voice.js): only when this person's voice mode asks for it, English only.
+  if (c.voiceReply && !failure && lang !== "ny" && ctx?.waitUntil) ctx.waitUntil(speakReply(shown, from, env));
   if (failure || opts.buttons === false || !shouldAskFeedback(shown)) return;
   const task = askForFeedback(from, userText, shown, hide ? references : "", env, lang === "ny", details);
   if (ctx?.waitUntil) ctx.waitUntil(task);

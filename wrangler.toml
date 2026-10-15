@@ -64,3 +64,7 @@ service = "chakudya-api"
 [[services]]
 binding = "CHAKUDYA_MCP"
 service = "chakudya-mcp-server-cloudflare"
+
+# Voice-note replies (src/voice.js) are configured with dashboard variables, which keep_vars = true
+# preserves across deploys: VOICE_REPLIES = "on", VOICE_CONVERTER_URL, VOICE_CONVERTER_TOKEN (secret),
+# and optionally VOICE_NAME and VOICE_MAX_CHARS. Off unless VOICE_REPLIES is "on" and the URL is set.

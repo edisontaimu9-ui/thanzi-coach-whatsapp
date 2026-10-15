@@ -160,6 +160,26 @@ percent change; give a time frame (1 week/1 month/3 months/6 months) to also
 get the significant/severe weight-loss interpretation (Width & Reinhard) for
 it, in the same call. See `src/weightChangeCheck.js`.
 
+## Voice-note replies
+
+The bot can follow its text answer with a short spoken voice note (English only, because Groq's
+Orpheus TTS has no Chichewa voice). It is **off until you opt in**, so deploying changes nothing.
+
+How it works: answer text -> Groq Orpheus TTS (WAV) -> `voice-converter/` (ffmpeg, OGG/Opus) ->
+WhatsApp media upload -> voice note. Only the opening of the answer is spoken (about 190
+characters, `VOICE_MAX_CHARS`), and references are never read out. If any step fails, the text
+reply is unaffected and no voice note is sent. See `src/voice.js`.
+
+Turn it on:
+1. Deploy `voice-converter/` (see its README) and note its URL and token.
+2. In Cloudflare > Workers & Pages > thanzi-coach-whatsapp > Settings > Variables and Secrets, add
+   `VOICE_CONVERTER_URL`, `VOICE_CONVERTER_TOKEN` (secret) and `VOICE_REPLIES` = `on`.
+   Optional: `VOICE_NAME` (default `autumn`), `VOICE_MAX_CHARS` (60-400).
+3. Push; migration `0011_add_user_voice.sql` applies automatically.
+
+People choose their own mode by sending a message: `voice auto` (default: a voice note in gets a
+voice note back), `voice on` (every English answer), or `voice off`.
+
 ## Test
 
 Send a WhatsApp message to the configured Business number asking a nutrition

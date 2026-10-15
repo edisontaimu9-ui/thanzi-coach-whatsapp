@@ -26,6 +26,7 @@ export const TOPIC_LABELS = Object.freeze({
   menu: "Menu & help",
   admin: "Admin",
   language: "Language",
+  voice: "Voice replies",
   other: "Other",
 });
 

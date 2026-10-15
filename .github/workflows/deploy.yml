@@ -35,7 +35,7 @@ jobs:
           command: deploy
 
 # Secrets (WHATSAPP_TOKEN, VERIFY_TOKEN, GROQ_API_KEY, STATS_TOKEN, ADMIN_PHONE,
-# CHAKUDYA_MCP_AUTH_TOKEN, CHAKUDYA_API_KEY) are no longer auto-pushed here — that step was
+# CHAKUDYA_MCP_AUTH_TOKEN, CHAKUDYA_API_KEY, and for voice replies VOICE_CONVERTER_TOKEN) are no longer auto-pushed here — that step was
 # failing on every push with no visible reason. Set/update them directly in
 # the Cloudflare dashboard instead:
 # Workers & Pages > thanzi-coach-whatsapp > Settings > Variables and Secrets.

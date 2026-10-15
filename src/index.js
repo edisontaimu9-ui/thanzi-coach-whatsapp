@@ -141,6 +141,10 @@
  *   ADMIN_PHONE             - optional; your own WhatsApp number for the daily
  *                            summary cron job (see wrangler.toml [triggers]).
  *                            No-ops if unset.
+ *   VOICE_CONVERTER_TOKEN   - optional; only for voice-note replies (./voice.js). Must match the
+ *                            voice-converter service's CONVERTER_TOKEN. Voice replies also need the
+ *                            variables VOICE_REPLIES=on and VOICE_CONVERTER_URL; without them the
+ *                            feature is off and nothing changes.
  *   CHAKUDYA_API_KEY        - REQUIRED. A consumer API key for chakudya-api (create one on the
  *                            Chakudya developer console). chakudya-api refuses every data
  *                            route without a key, so without this secret every food lookup,
@@ -186,6 +190,7 @@ import { clearAllScreeningSessions } from "./screeningShared.js";
 import { handleStats, handleStatsFeedback, handleStatsTimeseries, isDuplicateMessage, recordActivity, recordError, sendDailySummary } from "./analytics.js";
 import { downloadWhatsAppMedia, sendPromptList, sendTypingIndicator, sendWhatsAppReply } from "./whatsapp.js";
 import { handleImageMessage, transcribeAudio } from "./media.js";
+import { getVoicePref, parseVoiceCommand, saveVoicePref, shouldSpeak, voiceModeConfirmation, voiceRepliesEnabled } from "./voice.js";
 import { handleFeedbackTap } from "./feedbackFlow.js";
 import { handleGuidedFlows, handleMenusAndGreeting } from "./textFlows.js";
 import { handleComparisonsAndMultiFood, handleMealPlans, handleReferenceQueries } from "./nutritionHandlers.js";
@@ -430,6 +435,20 @@ async function handleTextMessageInner(userText, from, env, ctx, opts = {}, topic
   const lang = repliesInChichewa ? resolveLanguage(userText, langState) : "en";
   if (opts.learnLanguage && repliesInChichewa) ctx.waitUntil(learnLanguage(env.DB, from, langState, userText));
 
+  // Voice replies (./voice.js): "voice on|off|auto" sets this person's mode; otherwise work out whether
+  // this answer should also be spoken. Does nothing at all unless VOICE_REPLIES=on and the converter is set.
+  let voiceReply = false;
+  if (voiceRepliesEnabled(env)) {
+    const voiceCommand = parseVoiceCommand(userText);
+    if (voiceCommand) {
+      topic.name = "voice";
+      await saveVoicePref(env.DB, from, voiceCommand);
+      await sendWhatsAppReply(from, voiceModeConfirmation(voiceCommand), env);
+      return;
+    }
+    if (lang !== "ny") voiceReply = shouldSpeak(await getVoicePref(env.DB, from), opts.voiceReply);
+  }
+
   // Menu escape: "menu" / "help" / "start over" abandon whatever guided flow is in progress and show
   // the menu (otherwise a mid-flow "menu" is swallowed as an invalid answer). See isMenuEscape.
   if (isMenuEscape(userText)) {
@@ -441,7 +460,7 @@ async function handleTextMessageInner(userText, from, env, ctx, opts = {}, topic
 
   // The rest of the routing lives in the handler modules, tried in the same order as before. Each
   // returns true once it has replied to the message.
-  const c = { userText, from, env, ctx, opts, topic, langState, lang, repliesInChichewa };
+  const c = { userText, from, env, ctx, opts, topic, langState, lang, repliesInChichewa, voiceReply };
   if (await handleGuidedFlows(c)) return;
   if (await handleMenusAndGreeting(c)) return;
   if (await handleReferenceQueries(c)) return;
@@ -492,5 +511,6 @@ async function handleAudioMessage(audio, from, env, ctx) {
   // name) instead of silently getting an answer to the wrong question.
   await sendWhatsAppReply(from, `_Ndamva: "${transcript}"_`, env).catch(() => {});
 
-  await handleTextMessage(transcript, from, env, ctx);
+  // voiceReply: they spoke, so (in the default "auto" mode) they get a voice note back. See ./voice.js.
+  await handleTextMessage(transcript, from, env, ctx, { voiceReply: true });
 }

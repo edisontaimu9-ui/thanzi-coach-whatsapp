@@ -15,6 +15,7 @@ import { askForFeedback } from "./feedbackFlow.js";
 import { shouldClassifyIntent } from "./intentClassifier.js";
 import { classifyHelpIntent, localizeAnswer, translateWithGroq } from "./llm.js";
 import { sendPromptList, sendWhatsAppReply } from "./whatsapp.js";
+import { speakReply } from "./voice.js";
 
 /** AI fallback for help-shaped messages the regex detectors missed: shows the menu. Returns true when handled. */
 export async function handleHelpIntent(c) {
@@ -77,4 +78,6 @@ export async function answerQuestion(c) {
   } else {
     await sendWhatsAppReply(from, answer, env);
   }
+  // Optional spoken copy of a real English answer (./voice.js); references are never read out.
+  if (isRealAnswer && c.voiceReply && !inChichewa && ctx?.waitUntil) ctx.waitUntil(speakReply(main, from, env));
 }

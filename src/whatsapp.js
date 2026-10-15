@@ -103,6 +103,41 @@ function arrayBufferToBase64(buf) {
   return btoa(binary);
 }
 
+// Sends OGG/Opus bytes as a voice note: upload to the media endpoint, then send an audio message
+// that references the returned id (OGG/Opus mono shows as a voice bubble). Throws on failure; the
+// caller (speakReply in ./voice.js) catches, since a missing voice note must never break a reply.
+export async function sendWhatsAppVoiceNote(to, oggBytes, env) {
+  const form = new FormData();
+  form.append("messaging_product", "whatsapp");
+  form.append("type", "audio/ogg");
+  form.append("file", new Blob([oggBytes], { type: "audio/ogg; codecs=opus" }), "reply.ogg");
+
+  const up = await fetchWithTimeout(
+    fetch,
+    `https://graph.facebook.com/v20.0/${env.PHONE_NUMBER_ID}/media`,
+    { method: "POST", headers: { Authorization: `Bearer ${env.WHATSAPP_TOKEN}` }, body: form },
+    15000
+  );
+  if (!up.ok) {
+    throw new Error(`WhatsApp media upload error: ${up.status} ${await up.text()}`);
+  }
+  const { id } = await up.json();
+  if (!id) throw new Error("WhatsApp media upload returned no id");
+
+  const res = await fetchWithTimeout(
+    fetch,
+    `https://graph.facebook.com/v20.0/${env.PHONE_NUMBER_ID}/messages`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${env.WHATSAPP_TOKEN}` },
+      body: JSON.stringify({ messaging_product: "whatsapp", to, type: "audio", audio: { id } }),
+    }
+  );
+  if (!res.ok) {
+    throw new Error(`WhatsApp voice note send error: ${res.status} ${await res.text()}`);
+  }
+}
+
 // Marks the incoming message read and shows WhatsApp's native "typing..."
 // bubble — see https://developers.facebook.com/docs/whatsapp/cloud-api/typing-indicators.
 // Requires Graph API v22.0+ (typing_indicator isn't recognized on the
