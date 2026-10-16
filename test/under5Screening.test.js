@@ -218,6 +218,32 @@ describe("explainUnder5ScreeningResult", () => {
     }
   });
 
+  test("always appends the deterministic STRONGkids block after the model text, and the prompt forbids \"index is N kg\" wording", async () => {
+    const originalFetch = globalThis.fetch;
+    try {
+      let sentSystemPrompt = "";
+      globalThis.fetch = async (url, init) => {
+        sentSystemPrompt = JSON.parse(init.body).messages[0].content;
+        return new Response(JSON.stringify({ choices: [{ message: { content: "He is severely wasted." } }] }), { status: 200 });
+      };
+      const withSk = {
+        ...fakeResult,
+        screening: {
+          ...fakeResult.screening,
+          tools_administered: ["strongkids"],
+          strongkids: { total_score: 5, risk_category: "high risk" },
+        },
+      };
+      const text = await explainUnder5ScreeningResult(withSk, { GROQ_API_KEY: "test-key" });
+      assert.match(text, /\*Risk screening\*\n• STRONGkids: 5\/5 — high risk/);
+      assert.ok(text.indexOf("Risk screening") < text.indexOf("Recommended action"));
+      assert.match(sentSystemPrompt, /never write that an index/);
+      assert.match(sentSystemPrompt, /never "your child"/);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("uses the model's text but ALWAYS appends the real recommended action + disclaimer verbatim", async () => {
     const originalFetch = globalThis.fetch;
     try {

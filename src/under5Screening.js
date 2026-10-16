@@ -457,6 +457,26 @@ function formatIndicatorLine(label, indicator) {
   return `• ${label}: z=${indicator.z_score} — ${indicator.classification}`;
 }
 
+/**
+ * Deterministic "Risk screening" lines (STRONGkids/PNST/PYMS/STAMP). Returned as
+ * an array (empty when no tool was administered) so it can be appended after the
+ * LLM narration — the model is not trusted to mention these results.
+ */
+function riskScreeningBlock(result) {
+  const s = result.screening;
+  if (!s || !s.tools_administered || s.tools_administered.length === 0) return [];
+  const lines = ["*Risk screening*"];
+  if (s.strongkids) lines.push(`• STRONGkids: ${s.strongkids.total_score}/5 — ${s.strongkids.risk_category}`);
+  if (s.pnst) lines.push(`• PNST: ${s.pnst.affirmative_count}/4 — ${s.pnst.risk_category}`);
+  if (s.pyms) lines.push(`• PYMS: ${s.pyms.total_score}/8 — ${s.pyms.risk_category}`);
+  if (s.stamp) lines.push(`• STAMP: ${s.stamp.total_score}/9 — ${s.stamp.risk_category}`);
+  if (s.disagreement_noted) {
+    lines.push("⚠️ Screening tools disagreed with each other — see each result above rather than one summary.");
+  }
+  lines.push("");
+  return lines;
+}
+
 function formatUnder5ScreeningResult(result) {
   const lines = [];
   lines.push("*Under-5 Malnutrition Screening Result*");
@@ -483,18 +503,8 @@ function formatUnder5ScreeningResult(result) {
     lines.push("");
   }
 
-  const s = result.screening;
-  if (s.tools_administered.length > 0) {
-    lines.push("*Risk screening*");
-    if (s.strongkids) lines.push(`• STRONGkids: ${s.strongkids.total_score}/5 — ${s.strongkids.risk_category}`);
-    if (s.pnst) lines.push(`• PNST: ${s.pnst.affirmative_count}/4 — ${s.pnst.risk_category}`);
-    if (s.pyms) lines.push(`• PYMS: ${s.pyms.total_score}/8 — ${s.pyms.risk_category}`);
-    if (s.stamp) lines.push(`• STAMP: ${s.stamp.total_score}/9 — ${s.stamp.risk_category}`);
-    if (s.disagreement_noted) {
-      lines.push("⚠️ Screening tools disagreed with each other — see each result above rather than one summary.");
-    }
-    lines.push("");
-  }
+  const riskLines = riskScreeningBlock(result);
+  if (riskLines.length > 0) lines.push(...riskLines);
 
   lines.push(recommendedActionBlock(result));
 
@@ -565,7 +575,16 @@ export async function explainUnder5ScreeningResult(result, env) {
     "or not administered, say so plainly rather than guessing why. 4) Use WhatsApp-style formatting " +
     "only (*bold*, plain bullets with •) — no markdown headers, no tables, no code blocks. " +
     "5) Write in English only — do not use Chichewa or any other language, even a single word. " +
-    "6) Output ONLY the explanation text, nothing else (no preamble like \"Here's an explanation\").";
+    "6) Wording: weight-for-age, height-for-age, weight-for-height/length and BMI-for-age are z-score " +
+    "INDICES, never measurements — never write that an index \"is\" a number of kg or cm. State the " +
+    "measurement first, then the index, e.g. \"At 7 kg and 74.3 cm, his weight-for-height is severely wasted " +
+    "(z = -3.89)\". 7) Refer to the child as \"he\"/\"she\"/\"this boy\"/\"this girl\" according to child.sex — " +
+    "never \"your child\" and never switch between \"your child\" and he/she. 8) If the result shows the " +
+    "length/height was adjusted for lying vs standing measurement, say it was measured lying down and " +
+    "adjusted — do not call it a \"standing height\" without saying so. 9) Give MUAC with units in both " +
+    "forms, e.g. \"MUAC 100 mm (10.0 cm)\". 10) Do not summarise STRONGkids/PNST/PYMS/STAMP scores — a " +
+    "Risk screening block is appended separately. " +
+    "11) Output ONLY the explanation text, nothing else (no preamble like \"Here's an explanation\").";
 
   const userPrompt = `Screening result JSON:\n${JSON.stringify(result)}`;
 
@@ -609,7 +628,8 @@ export async function explainUnder5ScreeningResult(result, env) {
     }
     const text = toWhatsAppFormatting(rawText);
 
-    return [text, "", recommendedActionBlock(result)].join("\n");
+    const risk = riskScreeningBlock(result);
+    return [text, "", ...(risk.length ? risk : []), recommendedActionBlock(result)].join("\n");
   } catch (err) {
     console.error("Groq under5-explain failed:", err);
     return deterministic;
