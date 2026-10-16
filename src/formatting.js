@@ -252,7 +252,7 @@ export function formatFoodResult(item) {
   const iodine = roundNutrient(item.iodine_mcg);
 
   const macros = [];
-  if (kcal != null) macros.push(`${kcal} kcal`);
+  if (kcal != null) macros.push(item.ocr_raw?.energy_estimated ? `~${kcal} kcal (estimated from macros)` : `${kcal} kcal`);
   if (protein != null) macros.push(`${protein}g protein`);
   if (carbs != null) macros.push(`${carbs}g carbs`);
   if (fat != null) macros.push(`${fat}g fat`);
