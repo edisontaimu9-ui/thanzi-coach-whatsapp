@@ -179,6 +179,65 @@ export function scaleFoodToGrams(context, grams) {
   return lines.join("\n");
 }
 
+// Formats chakudya-api's /foods/convert result ("2 cups of rice") as a WhatsApp card: the weight the
+// household amount comes to, the nutrients for that amount, and any assumption/warning the API raised
+// (e.g. "no cup serving on file, 1 g/ml assumed") so a rough conversion is never presented as exact.
+const HOUSEHOLD_UNIT_LABEL = { cup: "cup", tbsp: "tbsp", tsp: "tsp", scoop: "scoop", chipande: "chipande" };
+
+export function formatHouseholdConversion(data, request) {
+  const grams = data?.standard?.grams;
+  const name = data?.food?.food_name;
+  if (!(grams > 0) || !name) return null;
+  const n = data.nutrients || {};
+  const unit = HOUSEHOLD_UNIT_LABEL[request.unit] || request.unit;
+  const numericAmount = String(request.amount)
+    .split(/\s+/)
+    .reduce((t, part) => t + (part.includes("/") ? Number(part.split("/")[0]) / Number(part.split("/")[1]) : Number(part)), 0);
+  const plural = numericAmount > 1 && (request.unit === "cup" || request.unit === "scoop") ? "s" : "";
+  const r = (v) => roundNutrient(Number(v));
+
+  const macros = [];
+  if (n.energy_kcal != null) macros.push(`${r(n.energy_kcal)} kcal`);
+  if (n.protein_g != null) macros.push(`${r(n.protein_g)}g protein`);
+  if (n.carbs_g != null) macros.push(`${r(n.carbs_g)}g carbs`);
+  if (n.fat_g != null) macros.push(`${r(n.fat_g)}g fat`);
+  if (!macros.length) return null;
+
+  const micros = [];
+  if (n.fiber_g != null) micros.push(`Fiber ${r(n.fiber_g)}g`);
+  if (n.calcium_mg != null) micros.push(`Calcium ${r(n.calcium_mg)}mg`);
+  if (n.iron_mg != null) micros.push(`Iron ${r(n.iron_mg)}mg`);
+
+  const lines = [`🥣 *${request.amount} ${unit}${plural} of ${name}* ≈ ${r(grams)} g`, macros.join(", ")];
+  if (micros.length) lines.push(micros.join(", "));
+  const notes = [...(data.assumptions || []), ...(data.warnings || [])].slice(0, 2);
+  for (const note of notes) lines.push(`_${note}_`);
+  return lines.join("\n");
+}
+
+// Food context for follow-ups ("and 50 g?") built from a /foods/convert result: the nutrients are already for
+// the converted amount, so that amount becomes the base the later gram request scales from.
+export function householdConversionContext(data) {
+  const grams = data?.standard?.grams;
+  const name = data?.food?.food_name;
+  if (!(grams > 0) || !name) return null;
+  const n = data.nutrients || {};
+  return {
+    name,
+    baseGrams: grams,
+    lastShownGrams: grams,
+    kcal: n.energy_kcal,
+    protein: n.protein_g,
+    carbs: n.carbs_g,
+    fat: n.fat_g,
+    fiber: n.fiber_g,
+    sodium: n.sodium_mg,
+    potassium: n.potassium_mg,
+    calcium: n.calcium_mg,
+    iron: n.iron_mg,
+  };
+}
+
 // Formats calculateEnergyRequirement's result (see ./energy.js) for a
 // standalone "calculate energy requirements" reply — the real math itself,
 // with the equation named so it's clear this is a calculated figure, not

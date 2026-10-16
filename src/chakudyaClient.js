@@ -20,6 +20,54 @@ export async function lookupFoodByName(name, env) {
   return Array.isArray(body?.data) ? body.data[0] : body?.data || null;
 }
 
+// Like lookupFoodByName, but keeps /foods/lookup's intent-aware ranking signals: chakudya-api scores the
+// candidate rows against the query's implied form (a bare "rice" favours cooked over raw/soaked, etc.) and
+// flags `ambiguous: true` with up to 3 ranked `alternates` when its pick wasn't clearly ahead. Returns
+// { item, ambiguous, alternates, source } (item null when nothing matched).
+export async function lookupFoodDetailed(name, env) {
+  const res = await chakudyaFetch(env, `https://chakudya-api/foods/lookup?q=${encodeURIComponent(name)}`);
+  if (!res.ok) return { item: null, ambiguous: false, alternates: [], source: null };
+  const body = await res.json().catch(() => null);
+  const item = Array.isArray(body?.data) ? body.data[0] : body?.data || null;
+  return {
+    item,
+    ambiguous: body?.ambiguous === true,
+    alternates: Array.isArray(body?.alternates) ? body.alternates : [],
+    source: body?.source ?? null,
+  };
+}
+
+// GET /growth/assess — combined WHO growth assessment (length/height-for-age, weight-for-age,
+// weight-for-length/height, BMI-for-age, head circumference, MUAC-for-age, MUAC cut-offs, acute-malnutrition
+// signals) in one call. Best-effort: returns chakudya-api's `data`, or null on any failure so a screening
+// reply is never blocked by this extra check.
+export async function assessGrowthViaChakudya(params, env) {
+  const q = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== null && v !== "") q.set(k, String(v));
+  }
+  try {
+    const res = await chakudyaFetch(env, `https://chakudya-api/growth/assess?${q.toString()}`);
+    if (!res.ok) return null;
+    const body = await res.json().catch(() => null);
+    return body?.data?.indicators ? body.data : null;
+  } catch {
+    return null;
+  }
+}
+
+// GET /foods/convert — household measure (cup, tbsp, scoop, chipande...) of a named food to grams, plus the
+// nutrients for that amount. Returns chakudya-api's `data` object, or null when the food/unit can't be
+// resolved (404/422) so the caller can fall through to the normal pipeline.
+export async function convertFoodAmount(food, amount, unit, env) {
+  const params = new URLSearchParams({ q: food, amount: String(amount), unit });
+  const res = await chakudyaFetch(env, `https://chakudya-api/foods/convert?${params.toString()}`);
+  if (!res.ok) return null;
+  const body = await res.json().catch(() => null);
+  const data = body?.data;
+  return data?.standard?.grams > 0 ? data : null;
+}
+
 // Same as lookupFoodByName, but forces chakudya-api's wider USDA/OFF/
 // FatSecret tier via ?tier=wider, skipping the local Malawi FCT match
 // entirely. Local FCT entries are sometimes a different preparation than

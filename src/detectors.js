@@ -306,6 +306,45 @@ export function detectFoodQuantity(query) {
   return null;
 }
 
+// Household-measure portion questions: "2 cups of rice", "how many calories in half a cup of beans",
+// "rice 2 cups", "1 1/2 tbsp peanut butter". Weight-based asks ("200g of rice") stay with
+// detectFoodQuantity; this covers cup/spoon/scoop/chipande amounts, which chakudya-api's /foods/convert
+// turns into grams using the food's own serving data.
+const HOUSEHOLD_UNIT = "(cups?|tablespoons?|tbsps?|tbs|teaspoons?|tsps?|scoops?|chipande)";
+const HOUSEHOLD_AMOUNT = "(\\d+\\s+\\d+\\/\\d+|\\d+\\/\\d+|\\d+(?:\\.\\d+)?|half(?:\\s+an?)?|an?|one|two|three|four|five)";
+const AMOUNT_WORDS = { half: "0.5", "half a": "0.5", "half an": "0.5", a: "1", an: "1", one: "1", two: "2", three: "3", four: "4", five: "5" };
+
+function normalizeHouseholdUnit(u) {
+  const w = u.toLowerCase();
+  if (w.startsWith("cup")) return "cup";
+  if (w.startsWith("tablespoon") || w === "tbsp" || w === "tbsps" || w === "tbs") return "tbsp";
+  if (w.startsWith("teaspoon") || w === "tsp" || w === "tsps") return "tsp";
+  if (w.startsWith("scoop")) return "scoop";
+  return "chipande";
+}
+
+export function detectFoodHouseholdQuantity(query) {
+  const clean = query.trim();
+  const amountFirst = clean.match(new RegExp(`${HOUSEHOLD_AMOUNT}\\s*${HOUSEHOLD_UNIT}\\s+(?:of\\s+)?([a-z][a-z '-]*?)[?.!]?$`, "i"));
+  const amountLast = clean.match(new RegExp(`([a-z][a-z '-]*?)\\s+${HOUSEHOLD_AMOUNT}\\s*${HOUSEHOLD_UNIT}[?.!]?$`, "i"));
+  let rawAmount, rawUnit, rawFood;
+  if (amountFirst) [, rawAmount, rawUnit, rawFood] = amountFirst;
+  else if (amountLast) {
+    [, rawFood, rawAmount, rawUnit] = amountLast;
+    rawFood = stripLeadingFillers(rawFood);
+  } else return null;
+
+  const food = (rawFood || "").trim();
+  if (!food) return null;
+  // "I have 3 cups" / "we drank 2 cups" name no food: a pronoun/verb is all that's left of the phrase.
+  if (/^(i|we|you|they|he|she|it|have|had|has|am|are|is|was|were|ate|eat|drink|drank|take|took|use|used|need|want|only|just|some|my|our)(\s|$)/i.test(food)) return null;
+  const key = rawAmount.toLowerCase().replace(/\s+/g, " ");
+  const amount = AMOUNT_WORDS[key] ?? rawAmount.trim();
+  const numeric = amount.includes("/") ? amount.split(/\s+/).reduce((t, p) => t + (p.includes("/") ? Number(p.split("/")[0]) / Number(p.split("/")[1]) : Number(p)), 0) : Number(amount);
+  if (!(numeric > 0 && numeric <= 50)) return null;
+  return { food, amount, unit: normalizeHouseholdUnit(rawUnit) };
+}
+
 // Filler words allowed in a "no food name, just a quantity" follow-up —
 // covers both direct forms ("Calculate for 50g serving", "scale to 200g
 // please") AND natural pronoun-referenced questions about whatever was

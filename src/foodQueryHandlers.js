@@ -7,10 +7,10 @@
  */
 
 import { sendResult } from "./feedbackFlow.js";
-import { answerFoodQuantity, lookupFoodByName, lookupWiderTierFoodByName, searchFoodCandidates } from "./chakudyaClient.js";
+import { answerFoodQuantity, convertFoodAmount, lookupFoodDetailed, lookupWiderTierFoodByName, searchFoodCandidates } from "./chakudyaClient.js";
 import { getLastFoodContext, saveLastFoodContext } from "./context.js";
-import { detectFoodQuantity, detectServingOnly, looksLikeBareFoodName } from "./detectors.js";
-import { formatFoodResult, getFoodItemName, isDirectFoodMatch, normalizeFoodName, scaleFoodToGrams, toFoodContext } from "./formatting.js";
+import { detectFoodHouseholdQuantity, detectFoodQuantity, detectServingOnly, looksLikeBareFoodName } from "./detectors.js";
+import { formatFoodResult, formatHouseholdConversion, getFoodItemName, householdConversionContext, isDirectFoodMatch, normalizeFoodName, scaleFoodToGrams, toFoodContext } from "./formatting.js";
 import { sendFoodOptionsList } from "./whatsapp.js";
 
 /** Food quantity ("100g nsima"), serving-only follow-ups, and bare food-name lookups. Returns true when handled. */
@@ -31,6 +31,23 @@ export async function handleFoodQueries(c) {
       ctx.waitUntil(
         saveLastFoodContext(from, { ...scaled.context, lastShownGrams: foodQty.grams }, env)
       );
+      return true;
+    }
+  }
+
+  // "2 cups of rice" / "half a cup of beans" — a household-measure portion. chakudya-api's /foods/convert
+  // turns the cups/spoons into grams using the food's own serving data and returns the nutrients for that
+  // amount (with an explicit assumption note when it had to guess a density), so no LLM is asked to guess a
+  // cup's weight. Falls through to the normal pipeline when the food or unit can't be resolved.
+  const household = detectFoodHouseholdQuantity(userText);
+  if (household) {
+    topic.name = "food_lookup";
+    const converted = await convertFoodAmount(household.food, household.amount, household.unit, env).catch(() => null);
+    const card = converted ? formatHouseholdConversion(converted, household) : null;
+    if (card) {
+      await sendResult(c, card, "Weights come from the food's own serving sizes in the Chakudya Nutrition Registry; nutrients are scaled from per-100 g values. Reference only.");
+      const context = householdConversionContext(converted);
+      if (context) ctx.waitUntil(saveLastFoodContext(from, context, env));
       return true;
     }
   }
@@ -86,9 +103,14 @@ export async function handleFoodQueries(c) {
   if (looksLikeBareFoodName(userText)) {
     topic.name = "food_lookup";
     const query = userText.trim();
-    const topResult = await lookupFoodByName(query, env);
+    const detailed = await lookupFoodDetailed(query, env);
+    const topResult = detailed.item;
 
-    if (topResult && isDirectFoodMatch(query, topResult)) {
+    // /foods/lookup ranks candidates by the query's intent (a bare "rice" favours cooked) and tells us when
+    // its pick wasn't clearly ahead. A confident local pick is shown directly; an ambiguous one becomes a
+    // tappable list built from the API's own ranked alternates.
+    const confidentLocal = detailed.source === "local" && !detailed.ambiguous;
+    if (topResult && (isDirectFoodMatch(query, topResult) || confidentLocal)) {
       const card = formatFoodResult(topResult);
       if (card) {
         await sendResult(c, card, "Nutrient values come from the Chakudya Nutrition Registry (Malawi food composition data and linked sources), per the amount shown. Reference only.");
@@ -97,10 +119,12 @@ export async function handleFoodQueries(c) {
         return true;
       }
     } else {
-      const [candidates, widerTierResult] = await Promise.all([
-        searchFoodCandidates(query, env, 3),
+      // Prefer the API's intent-ranked alternates; fall back to the fuzzy search when it gave none.
+      const [searchCandidates, widerTierResult] = await Promise.all([
+        detailed.ambiguous && detailed.alternates.length ? Promise.resolve(detailed.alternates.slice(0, 3)) : searchFoodCandidates(query, env, 3),
         lookupWiderTierFoodByName(query, env),
       ]);
+      const candidates = [...searchCandidates];
       const topName = topResult ? getFoodItemName(topResult) : null;
       const alreadyListed =
         topName &&

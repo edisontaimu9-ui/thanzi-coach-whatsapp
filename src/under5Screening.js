@@ -60,6 +60,7 @@
 
 import { beginSchoolAgeScreening } from "./schoolAgeScreening.js";
 import { isKnowledgeQuestion } from "./screeningShared.js";
+import { assessGrowthViaChakudya } from "./chakudyaClient.js";
 
 
 const SESSION_KIND = "under5_screening";
@@ -132,7 +133,7 @@ export function detectUnder5ScreeningTrigger(text) {
 
 // Exported for unit testing (see test/under5Screening.test.js) — these are
 // pure functions with no D1/network dependency.
-export { parseSex, parseAge, parseNumber, parseMuacMm, parseYesNo, parseMeasurementMethod, parseContext, nextStep, applyReply, formatUnder5ScreeningResult, toWhatsAppFormatting };
+export { buildGrowthAssessParams, formatGrowthCheckBlock, parseSex, parseAge, parseNumber, parseMuacMm, parseYesNo, parseMeasurementMethod, parseContext, nextStep, applyReply, formatUnder5ScreeningResult, toWhatsAppFormatting };
 
 // ── Field parsers ──
 
@@ -531,6 +532,78 @@ function formatUnder5ScreeningResult(result, opts = {}) {
   return lines.join("\n");
 }
 
+// ── WHO growth check (chakudya-api GET /growth/assess) ──
+//
+// The integrated screen already reports weight-for-age, height-for-age, weight-for-height and BMI-for-age plus
+// the NACS class. /growth/assess adds what it doesn't: MUAC-for-age (z-score, 3-60 months), a ranked list of
+// everything outside the normal range, and chakudya-api's own acute-malnutrition signals as a cross-check. It is
+// appended after the narration as a deterministic block, and skipped silently if the call fails.
+
+/** Maps the collected answers (plus the age the screen resolved) to /growth/assess query params. */
+function buildGrowthAssessParams(data, rawAgeMonths) {
+  const ageMonths = Math.floor(Number(rawAgeMonths));
+  if (!Number.isFinite(ageMonths) || ageMonths < 0 || ageMonths > 228) return null;
+  const sex = data.sex === "male" ? "boys" : data.sex === "female" ? "girls" : null;
+  if (!sex) return null;
+  const params = { sex, age_months: ageMonths };
+  if (data.weight_kg != null) params.weight_kg = data.weight_kg;
+  if (data.length_or_height_cm != null) {
+    // A lying measurement is a length, a standing one a height; with no method given, the API infers from age.
+    if (data.measurement_method === "standing") params.height_cm = data.length_or_height_cm;
+    else params.length_cm = data.length_or_height_cm;
+    if (data.measurement_method) params.measured = data.measurement_method;
+  }
+  if (data.muac_mm != null) params.muac_cm = Math.round(data.muac_mm) / 10;
+  const measured = ["weight_kg", "length_cm", "height_cm", "muac_cm"].some((k) => params[k] !== undefined);
+  return measured ? params : null;
+}
+
+const GROWTH_INDICATOR_LABELS = {
+  length_height_for_age: "Length/height-for-age",
+  weight_for_age: "Weight-for-age",
+  weight_for_length_height: "Weight-for-length/height",
+  bmi_for_age: "BMI-for-age",
+  hc_for_age: "Head circumference-for-age",
+  muac_for_age: "MUAC-for-age",
+  muac_fixed: "MUAC cut-off",
+};
+
+function formatGrowthCheckBlock(growth, opts = {}) {
+  if (!growth?.indicators) return null;
+  const lines = ["*WHO growth check (Chakudya)*"];
+
+  const muacZ = growth.indicators.muac_for_age;
+  if (muacZ && !muacZ.error && muacZ.status) {
+    lines.push(`• MUAC-for-age: ${muacZ.z_score != null ? `z=${muacZ.z_score} — ` : ""}${muacZ.status}`);
+  }
+
+  const attention = (growth.attention || []).slice(0, 4);
+  if (attention.length) {
+    lines.push(
+      "• Outside normal range: " +
+        attention
+          .map((a) => `${GROWTH_INDICATOR_LABELS[a.indicator] || a.indicator} (${a.status}${a.z_score != null ? `, z ${a.z_score}` : ""})`)
+          .join("; ")
+    );
+  } else {
+    lines.push("• All assessed indicators are within the normal range.");
+  }
+
+  const acute = growth.acute_malnutrition_signals;
+  if (acute) {
+    lines.push(
+      acute.level === "none"
+        ? "• Acute malnutrition signals (weight-for-height and MUAC): none"
+        : `• Acute malnutrition signals: *${acute.level}* — ${(acute.reasons || []).join("; ")}`
+    );
+  }
+  if (opts.oedema) {
+    lines.push("• Bilateral pitting oedema was reported: that alone indicates severe acute malnutrition (CMAM), whatever the values above show.");
+  }
+  lines.push("_Screening aid only. WHO growth standards; confirm clinically._");
+  return lines.join("\n");
+}
+
 // ── Optional Groq narration layer (see the design-decision comment at the
 // top of this file). Uses this repo's existing GROQ_API_KEY / model choice
 // — same provider as readBarcodeFromImage/generateMealPlan in index.js —
@@ -735,7 +808,14 @@ export async function handleUnder5ScreeningFlow(userText, from, env) {
 
   try {
     const screenResult = await callUnder5IntegratedScreen(args, env);
-    return await explainUnder5ScreeningResult(screenResult, env, { oedema: hasOedema(screenResult, args) });
+    const oedema = hasOedema(screenResult, args);
+    const explained = await explainUnder5ScreeningResult(screenResult, env, { oedema });
+
+    // Extra cross-check from chakudya-api's combined WHO growth assessment; never blocks the main result.
+    const growthParams = buildGrowthAssessParams(data, screenResult?.child?.age_months);
+    const growth = growthParams ? await assessGrowthViaChakudya(growthParams, env) : null;
+    const growthBlock = formatGrowthCheckBlock(growth, { oedema });
+    return growthBlock ? `${explained}\n\n${growthBlock}` : explained;
   } catch (err) {
     console.error("under5_integrated_screen call failed:", err);
     return `Sorry, the screening tool couldn't complete: ${err instanceof Error ? err.message : String(err)}. Please try again in a moment.`;
