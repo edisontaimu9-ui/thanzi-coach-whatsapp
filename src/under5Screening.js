@@ -477,7 +477,22 @@ function riskScreeningBlock(result) {
   return lines;
 }
 
-function formatUnder5ScreeningResult(result) {
+/**
+ * True when bilateral pitting oedema was reported (from the session answers we
+ * sent) or the integrated result itself carries an oedema indicator/flag.
+ */
+function hasOedema(result, args) {
+  if (args && args.edema === true) return true;
+  const inds = result?.nacs_classification?.indicators ?? [];
+  if (inds.some((i) => /o?edema/i.test(String(i.indicator)) && i.classification !== "none" && i.classification !== "normal")) return true;
+  return (result?.clinical_flags ?? []).some((f) => /o?edema/i.test(String(f.flag)));
+}
+
+const OEDEMA_NOTE =
+  "⚠️ *Oedema present:* fluid adds weight, so weight-for-age, weight-for-height and BMI-for-age are unreliable. " +
+  "A \"normal\" value here does not rule out malnutrition — oedema and MUAC drive the SAM classification.";
+
+function formatUnder5ScreeningResult(result, opts = {}) {
   const lines = [];
   lines.push("*Under-5 Malnutrition Screening Result*");
   lines.push(`Child: ${result.child.age_months} months, ${result.child.sex}`);
@@ -490,6 +505,7 @@ function formatUnder5ScreeningResult(result) {
   const whLabel = a.weight_for_length_or_height.standard_used === "weight_for_height" ? "Weight-for-height" : "Weight-for-length";
   lines.push(formatIndicatorLine(whLabel, a.weight_for_length_or_height));
   lines.push(formatIndicatorLine("BMI-for-age", a.bmi_for_age));
+  if (opts.oedema) lines.push(OEDEMA_NOTE);
   lines.push("");
 
   if (result.nacs_classification) {
@@ -558,8 +574,8 @@ function toWhatsAppFormatting(text) {
  * on any failure: no GROQ_API_KEY, a timeout, a non-200 response, or
  * unparseable/empty content.
  */
-export async function explainUnder5ScreeningResult(result, env) {
-  const deterministic = formatUnder5ScreeningResult(result);
+export async function explainUnder5ScreeningResult(result, env, opts = {}) {
+  const deterministic = formatUnder5ScreeningResult(result, opts);
   if (!env.GROQ_API_KEY) return deterministic;
 
   const systemPrompt =
@@ -584,9 +600,12 @@ export async function explainUnder5ScreeningResult(result, env) {
     "adjusted — do not call it a \"standing height\" without saying so. 9) Give MUAC with units in both " +
     "forms, e.g. \"MUAC 100 mm (10.0 cm)\". 10) Do not summarise STRONGkids/PNST/PYMS/STAMP scores — a " +
     "Risk screening block is appended separately. " +
-    "11) Output ONLY the explanation text, nothing else (no preamble like \"Here's an explanation\").";
+    "11) Spell it \"oedema\" (British), never \"edema\". 12) Never say the height was \"estimated\" — if adjusted, say \"adjusted from the lying-down measurement\". " +
+    "13) If oedema_present is true, do not describe weight-for-age, weight-for-height or BMI-for-age as reassuring; " +
+    "state the values but say they are unreliable with oedema (an oedema note is appended separately). " +
+    "14) Output ONLY the explanation text, nothing else (no preamble like \"Here's an explanation\").";
 
-  const userPrompt = `Screening result JSON:\n${JSON.stringify(result)}`;
+  const userPrompt = `Screening result JSON:\n${JSON.stringify(opts.oedema ? { ...result, oedema_present: true } : result)}`;
 
   try {
     const controller = new AbortController();
@@ -629,7 +648,7 @@ export async function explainUnder5ScreeningResult(result, env) {
     const text = toWhatsAppFormatting(rawText);
 
     const risk = riskScreeningBlock(result);
-    return [text, "", ...(risk.length ? risk : []), recommendedActionBlock(result)].join("\n");
+    return [text, ...(opts.oedema ? ["", OEDEMA_NOTE] : []), "", ...risk, recommendedActionBlock(result)].join("\n");
   } catch (err) {
     console.error("Groq under5-explain failed:", err);
     return deterministic;
@@ -716,7 +735,7 @@ export async function handleUnder5ScreeningFlow(userText, from, env) {
 
   try {
     const screenResult = await callUnder5IntegratedScreen(args, env);
-    return await explainUnder5ScreeningResult(screenResult, env);
+    return await explainUnder5ScreeningResult(screenResult, env, { oedema: hasOedema(screenResult, args) });
   } catch (err) {
     console.error("under5_integrated_screen call failed:", err);
     return `Sorry, the screening tool couldn't complete: ${err instanceof Error ? err.message : String(err)}. Please try again in a moment.`;

@@ -244,6 +244,35 @@ describe("explainUnder5ScreeningResult", () => {
     }
   });
 
+  test("appends the oedema reliability note and tells the model oedema is present", async () => {
+    const originalFetch = globalThis.fetch;
+    try {
+      let sentUser = "";
+      let sentSystem = "";
+      globalThis.fetch = async (url, init) => {
+        const b = JSON.parse(init.body);
+        sentSystem = b.messages[0].content;
+        sentUser = b.messages[1].content;
+        return new Response(JSON.stringify({ choices: [{ message: { content: "He is severely wasted." } }] }), { status: 200 });
+      };
+      const text = await explainUnder5ScreeningResult(fakeResult, { GROQ_API_KEY: "test-key" }, { oedema: true });
+      assert.match(text, /Oedema present/);
+      assert.ok(text.indexOf("Oedema present") < text.indexOf("Recommended action"));
+      assert.match(sentUser, /"oedema_present":true/);
+      assert.match(sentSystem, /never "edema"/);
+      assert.match(sentSystem, /Never say the height was "estimated"/);
+      const none = await explainUnder5ScreeningResult(fakeResult, { GROQ_API_KEY: "test-key" });
+      assert.doesNotMatch(none, /Oedema present/);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("deterministic fallback also carries the oedema note", async () => {
+    const text = await explainUnder5ScreeningResult(fakeResult, {}, { oedema: true });
+    assert.match(text, /Oedema present/);
+  });
+
   test("uses the model's text but ALWAYS appends the real recommended action + disclaimer verbatim", async () => {
     const originalFetch = globalThis.fetch;
     try {
