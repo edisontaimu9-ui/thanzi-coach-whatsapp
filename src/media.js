@@ -9,9 +9,30 @@ import zxingReaderWasmModule from "zxing-wasm/dist/reader/zxing_reader.wasm";
 import { sendResult } from "./feedbackFlow.js";
 import { downloadWhatsAppMedia, sendWhatsAppReply } from "./whatsapp.js";
 import { lookupBarcode, scanPackagedLabel } from "./chakudyaClient.js";
-import { saveLastFoodContext } from "./context.js";
+import { getLastSessionContext, saveLastFoodContext, saveLastSessionContext } from "./context.js";
+import { LLM_BUSY_MESSAGE, SUBREQUEST_LIMIT_MESSAGE } from "./errors.js";
 import { toFoodContext } from "./formatting.js";
 import { fetchWithRetry } from "./http.js";
+
+// A barcode read from one photo is remembered briefly so the NEXT photo (the nutrition label) can be
+// submitted together with it, e.g. when the first label scan failed or the barcode and label are on
+// different faces of the pack. Short window so a stale barcode never attaches to an unrelated product.
+const PENDING_BARCODE_KIND = "pending_barcode";
+const PENDING_BARCODE_MAX_AGE_MS = 15 * 60 * 1000;
+
+async function getPendingBarcode(from, env) {
+  const p = await getLastSessionContext(from, PENDING_BARCODE_KIND, env);
+  if (!p?.barcode || !p.savedAt) return null;
+  return Date.now() - p.savedAt <= PENDING_BARCODE_MAX_AGE_MS ? p.barcode : null;
+}
+
+async function setPendingBarcode(from, barcode, env) {
+  await saveLastSessionContext(from, PENDING_BARCODE_KIND, { barcode, savedAt: Date.now() }, env);
+}
+
+async function clearPendingBarcode(from, env) {
+  await saveLastSessionContext(from, PENDING_BARCODE_KIND, { barcode: null, savedAt: 0 }, env);
+}
 
 export async function handleImageMessage(image, from, env, ctx) {
   const c = { from, env, ctx, userText: "[photo]", lang: "en" }; // routing-context stand-in for sendResult
@@ -43,25 +64,50 @@ export async function handleImageMessage(image, from, env, ctx) {
     barcode = await readBarcodeFromImage(base64, mimeType, env);
   }
 
+  // No barcode visible in THIS photo: if the person just sent one in the previous photo, pair it with this
+  // label so both get submitted together.
+  let fromPending = false;
+  if (!barcode) {
+    const pending = await getPendingBarcode(from, env);
+    if (pending) {
+      barcode = pending;
+      fromPending = true;
+    }
+  }
+
   if (barcode) {
-    const found = await lookupBarcode(barcode, env);
+    // A pending barcode was already looked up (and wasn't found) when it was first read.
+    const found = fromPending ? null : await lookupBarcode(barcode, env);
     if (found) {
+      await clearPendingBarcode(from, env);
       await sendResult(c, found.text, "Product details come from the packaged-food database matched to this barcode. Check the pack for the latest figures.");
       ctx.waitUntil(saveLastFoodContext(from, toFoodContext(found.item), env));
       return;
     }
 
-    // Barcode read fine, but this product isn't in Chakudya yet — this is
-    // the actual "submit a new product" path: run the same nutrition-label
-    // OCR pipeline used below for photos with no barcode, passing along
-    // the barcode we already decoded so the submission is correctly keyed
-    // to it. /packaged/scan inserts it into the review queue as
-    // status="pending" — this is what lets ANY user grow the database via
-    // WhatsApp, not just a one-off manual /packaged/submit call.
+    // Barcode read fine, but this product isn't in Chakudya yet: read the nutrition label and submit the
+    // label together with the barcode (/packaged/scan inserts it into the review queue as
+    // status="pending"). The barcode is remembered first so it isn't lost if the label read fails.
+    await setPendingBarcode(from, barcode, env);
     const result = await scanPackagedLabel(base64, mimeType, env, barcode);
+
+    if (result.text === LLM_BUSY_MESSAGE || result.text === SUBREQUEST_LIMIT_MESSAGE || !result.context) {
+      const why = result.text === LLM_BUSY_MESSAGE || result.text === SUBREQUEST_LIMIT_MESSAGE
+        ? "I couldn't read the label just now"
+        : "I couldn't read the label clearly";
+      await sendWhatsAppReply(
+        from,
+        `I read barcode ${barcode}, but it's not in the database yet, and ${why.charAt(0).toLowerCase() + why.slice(1)}.\n\n` +
+          "Please send a clear, upright photo of the *nutrition panel* and I'll save it together with this barcode. 📷",
+        env
+      );
+      return;
+    }
+
+    await clearPendingBarcode(from, env);
     const prefix = `I read barcode ${barcode}, but it's not in the database yet. `;
-    await sendResult(c, prefix + result.text, "Read from the nutrition label in your photo and submitted to the Chakudya review queue. Check the pack for the latest figures.", { buttons: Boolean(result.context) });
-    if (result.context) ctx.waitUntil(saveLastFoodContext(from, result.context, env));
+    await sendResult(c, prefix + result.text, "Read from the nutrition label in your photo and submitted to the Chakudya review queue. Check the pack for the latest figures.", { buttons: true });
+    ctx.waitUntil(saveLastFoodContext(from, result.context, env));
     return;
   }
 
