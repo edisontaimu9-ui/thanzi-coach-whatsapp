@@ -205,7 +205,7 @@ async function readBarcodeFromImage(base64, mimeType, env) {
         Authorization: `Bearer ${env.GROQ_API_KEY}`,
       },
       body: JSON.stringify({
-        model: "qwen/qwen3.6-27b",
+        model: env.GROQ_VISION_MODEL || "qwen/qwen3.8-27b",
         messages: [
           {
             role: "user",
