@@ -224,7 +224,7 @@ export function formatFoodResult(item) {
   // convention when no other serving size is given (unlike branded/OFF
   // products, which usually specify their own package quantity) — default
   // to that instead of silently omitting the amount.
-  const measure = item.measure || item.raw_data?.quantity || "100 g";
+  const measure = item.measure || item.raw_data?.quantity || (item.ocr_raw?.per === "100ml" ? "100 ml" : item.serving_size) || "100 g";
   const measureText = ` — ${measure}`;
   const kcal = roundNutrient(item.kcal ?? item.energy_kcal);
   const protein = roundNutrient(item.protein_g);
