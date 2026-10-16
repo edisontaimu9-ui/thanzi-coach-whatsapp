@@ -97,7 +97,7 @@ export async function handleImageMessage(image, from, env, ctx) {
         : "I couldn't read the label clearly";
       await sendWhatsAppReply(
         from,
-        `I read barcode ${barcode}, but it's not in the database yet, and ${why.charAt(0).toLowerCase() + why.slice(1)}.\n\n` +
+        `I read barcode ${barcode}, but it's not in the database yet, and ${why}.\n\n` +
           "Please send a clear, upright photo of the *nutrition panel* and I'll save it together with this barcode. 📷",
         env
       );
