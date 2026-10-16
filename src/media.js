@@ -231,7 +231,10 @@ async function readBarcodeFromImage(base64, mimeType, env) {
     const body = await res.json();
     const raw = body?.choices?.[0]?.message?.content?.trim() || "";
     const digits = raw.replace(/\D/g, "");
-    return digits.length >= 8 && digits.length <= 14 ? digits : null;
+    // A vision model reading printed digits can drop or swap one; a wrong
+    // barcode would key the submitted product to the wrong row. Only accept
+    // a read whose GS1 check digit adds up, otherwise treat it as "no barcode".
+    return isValidGs1Barcode(digits) ? digits : null;
   } catch (err) {
     // fetchWithRetry's own retry can still throw (e.g. two consecutive
     // network failures/timeouts) — that's not caught anywhere upstream of
@@ -240,4 +243,15 @@ async function readBarcodeFromImage(base64, mimeType, env) {
     console.error("Groq barcode read failed:", err);
     return null; // fail open -> falls back to nutrition-label OCR
   }
+}
+
+// GS1 check-digit validation for EAN-8 / UPC-A (12) / EAN-13 / GTIN-14.
+// Weights alternate 3,1,3,1... starting from the digit next to the check digit.
+export function isValidGs1Barcode(digits) {
+  if (!/^\d+$/.test(digits || "") || ![8, 12, 13, 14].includes(digits.length)) return false;
+  let sum = 0;
+  for (let i = digits.length - 2, w = 3; i >= 0; i--, w = w === 3 ? 1 : 3) {
+    sum += Number(digits[i]) * w;
+  }
+  return (10 - (sum % 10)) % 10 === Number(digits[digits.length - 1]);
 }
