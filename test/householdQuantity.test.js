@@ -43,3 +43,18 @@ test("the saved context rescales a later gram follow-up from the converted amoun
   const half = scaleFoodToGrams(ctx, 158);
   assert.match(half, /205.4 kcal/);
 });
+
+test("reads kcal from the local-food `kcal` field and rewrites the API's id= warning in chat terms", () => {
+  const data = {
+    food: { food_name: "Rice, white, cooked" },
+    standard: { grams: 300 },
+    nutrients: { kcal: 180, protein_g: 3, carbs_g: 40.5, fat_g: 0.3 },
+    assumptions: [],
+    warnings: ["'rice' matched more than one food; this used 'Rice, white, cooked'. Repeat with id=<id> (see food.other_matches) for a different one."],
+  };
+  const card = formatHouseholdConversion(data, { amount: "2", unit: "cup" });
+  assert.match(card, /180 kcal, 3g protein/);
+  assert.doesNotMatch(card, /id=<id>|other_matches/);
+  assert.match(card, /Name a more specific food/);
+  assert.equal(householdConversionContext(data).kcal, 180);
+});

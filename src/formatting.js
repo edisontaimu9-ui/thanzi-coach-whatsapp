@@ -197,7 +197,8 @@ export function formatHouseholdConversion(data, request) {
   const r = (v) => roundNutrient(Number(v));
 
   const macros = [];
-  if (n.energy_kcal != null) macros.push(`${r(n.energy_kcal)} kcal`);
+  const kcal = n.kcal ?? n.energy_kcal;
+  if (kcal != null) macros.push(`${r(kcal)} kcal`);
   if (n.protein_g != null) macros.push(`${r(n.protein_g)}g protein`);
   if (n.carbs_g != null) macros.push(`${r(n.carbs_g)}g carbs`);
   if (n.fat_g != null) macros.push(`${r(n.fat_g)}g fat`);
@@ -210,7 +211,9 @@ export function formatHouseholdConversion(data, request) {
 
   const lines = [`🥣 *${request.amount} ${unit}${plural} of ${name}* ≈ ${r(grams)} g`, macros.join(", ")];
   if (micros.length) lines.push(micros.join(", "));
-  const notes = [...(data.assumptions || []), ...(data.warnings || [])].slice(0, 2);
+  // "matched more than one food ... repeat with id=<id>" is API-speak; say it in chat terms instead.
+  const warnings = (data.warnings || []).map((w) => (/matched more than one food/i.test(w) ? `Used "${name}". Name a more specific food (e.g. "brown rice") for a different match.` : w));
+  const notes = [...(data.assumptions || []), ...warnings].slice(0, 2);
   for (const note of notes) lines.push(`_${note}_`);
   return lines.join("\n");
 }
@@ -226,7 +229,7 @@ export function householdConversionContext(data) {
     name,
     baseGrams: grams,
     lastShownGrams: grams,
-    kcal: n.energy_kcal,
+    kcal: n.kcal ?? n.energy_kcal,
     protein: n.protein_g,
     carbs: n.carbs_g,
     fat: n.fat_g,

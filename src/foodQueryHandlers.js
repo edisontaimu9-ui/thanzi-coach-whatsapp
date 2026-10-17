@@ -106,18 +106,22 @@ export async function handleFoodQueries(c) {
     const detailed = await lookupFoodDetailed(query, env);
     const topResult = detailed.item;
 
+    const FOOD_CARD_DETAILS = "Nutrient values come from the Chakudya Nutrition Registry (Malawi food composition data and linked sources), per the amount shown. Reference only.";
+    const sendFoodCard = async (item) => {
+      const card = formatFoodResult(item);
+      if (!card) return false;
+      await sendResult(c, card, FOOD_CARD_DETAILS);
+      const context = toFoodContext(item);
+      if (context) ctx.waitUntil(saveLastFoodContext(from, context, env));
+      return true;
+    };
+
     // /foods/lookup ranks candidates by the query's intent (a bare "rice" favours cooked) and tells us when
-    // its pick wasn't clearly ahead. A confident local pick is shown directly; an ambiguous one becomes a
-    // tappable list built from the API's own ranked alternates.
-    const confidentLocal = detailed.source === "local" && !detailed.ambiguous;
-    if (topResult && (isDirectFoodMatch(query, topResult) || confidentLocal)) {
-      const card = formatFoodResult(topResult);
-      if (card) {
-        await sendResult(c, card, "Nutrient values come from the Chakudya Nutrition Registry (Malawi food composition data and linked sources), per the amount shown. Reference only.");
-        const context = toFoodContext(topResult);
-        if (context) ctx.waitUntil(saveLastFoodContext(from, context, env));
-        return true;
-      }
+    // its pick wasn't clearly ahead. The match does not need to be exact: unless the API flagged the pick as
+    // ambiguous, show it straight away. Only a genuinely ambiguous name becomes a tappable list built from the
+    // API's own ranked alternates, and a list with a single option is skipped in favour of just showing it.
+    if (topResult && (isDirectFoodMatch(query, topResult) || !detailed.ambiguous)) {
+      if (await sendFoodCard(topResult)) return true;
     } else {
       // Prefer the API's intent-ranked alternates; fall back to the fuzzy search when it gave none.
       const [searchCandidates, widerTierResult] = await Promise.all([
@@ -149,8 +153,15 @@ export async function handleFoodQueries(c) {
           ? [...candidates.slice(0, 2), widerTierResult]
           : candidates;
 
-      if (finalCandidates.length) {
-        const sent = await sendFoodOptionsList(from, query, finalCandidates.slice(0, 3), env);
+      const distinct = [];
+      for (const cand of finalCandidates) {
+        const key = normalizeFoodName(getFoodItemName(cand) || "");
+        if (key && !distinct.some((d) => normalizeFoodName(getFoodItemName(d) || "") === key)) distinct.push(cand);
+      }
+      if (distinct.length === 1) {
+        if (await sendFoodCard(distinct[0])) return true;
+      } else if (distinct.length > 1) {
+        const sent = await sendFoodOptionsList(from, query, distinct.slice(0, 3), env);
         if (sent) return true;
       }
     }

@@ -321,7 +321,7 @@ export async function sendFoodOptionsList(to, query, candidates, env) {
   await sendWhatsAppInteractiveList(
     to,
     {
-      body: `I couldn't find an exact match for "${query}". Did you mean one of these?`,
+      body: `Several foods match "${query}". Tap the one you mean:`,
       buttonText: "Choose a food",
       sections: [{ title: "Closest matches", rows }],
     },

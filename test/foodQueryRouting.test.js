@@ -104,3 +104,43 @@ test("a confident local pick is shown directly as a card, not a list", async () 
     t.restore();
   }
 });
+
+test("a close but not exact match is shown straight away (no 'couldn't find an exact match' prompt)", async () => {
+  const lookup = { status: "success", source: "local_fuzzy", data: { food_name: "Quinoa, cooked", energy_kcal: 120, protein_g: 4.4, carbs_g: 21.3, fat_g: 1.9 } };
+  const t = setup([["/foods/lookup", lookup]]);
+  try {
+    const handled = await handleFoodQueries(t.c("Quinoa"));
+    assert.equal(handled, true);
+    assert.ok(!t.sent.some((b) => b.includes('"interactive"')));
+    assert.ok(!t.sent.some((b) => b.includes("exact match")));
+    assert.ok(t.sent.some((b) => b.includes("Quinoa, cooked")));
+  } finally {
+    t.restore();
+  }
+});
+
+test("an ambiguous result with only one real candidate is shown, not offered as a one-item list", async () => {
+  const lookup = { status: "success", source: "local_fuzzy", ambiguous: true, data: { food_name: "Quinoa, cooked", energy_kcal: 120 }, alternates: [] };
+  const t = setup([["/foods/lookup", lookup]]);
+  try {
+    const handled = await handleFoodQueries(t.c("Quinoa"));
+    assert.equal(handled, true);
+    assert.ok(!t.sent.some((b) => b.includes('"interactive"')));
+    assert.ok(t.sent.some((b) => b.includes("Quinoa, cooked")));
+  } finally {
+    t.restore();
+  }
+});
+
+test("the options list uses friendly wording", async () => {
+  const lookup = { status: "success", source: "local_fuzzy", ambiguous: true, data: { food_name: "Rice, soaked" }, alternates: [{ food_name: "Rice, cooked" }, { food_name: "Rice, raw" }] };
+  const t = setup([["/foods/lookup", lookup]]);
+  try {
+    await handleFoodQueries(t.c("Rice"));
+    const list = t.sent.find((b) => b.includes('"interactive"'));
+    assert.ok(list.includes("Tap the one you mean"));
+    assert.ok(!list.includes("exact match"));
+  } finally {
+    t.restore();
+  }
+});
